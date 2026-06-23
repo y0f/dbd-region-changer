@@ -1,0 +1,28 @@
+# Local Linux verification for Windows developers.
+# Builds, vets, tests, and headless-smokes the Linux binary so you can be sure
+# the Linux target works without a Linux machine.
+#
+#   docker build -f build/Dockerfile.linux-test -t dbd-linux-test .
+#   docker run --rm dbd-linux-test
+FROM golang:1.26-bookworm
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        gcc \
+        libgl1-mesa-dev \
+        libgl1-mesa-dri \
+        xorg-dev \
+        libxkbcommon-dev \
+        xvfb \
+        xauth \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY . .
+
+ENV CGO_ENABLED=1
+
+# Fail the image build early if anything does not compile on Linux.
+RUN go build ./... && go vet ./...
+
+CMD ["bash", "scripts/linux-verify.sh"]

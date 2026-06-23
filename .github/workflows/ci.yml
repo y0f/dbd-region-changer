@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: Linux (test + build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+      - name: Install Fyne / CGO build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc libgl1-mesa-dev xorg-dev libxkbcommon-dev xvfb
+      - name: Vet
+        run: go vet ./...
+      - name: Test (full, CGO + race)
+        env:
+          CGO_ENABLED: "1"
+        run: go test -race ./...
+      - name: Build all packages (incl. GUI)
+        env:
+          CGO_ENABLED: "1"
+        run: go build ./...
+
+  windows:
+    name: Windows (test + build)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+      - name: Set up MinGW (gcc for CGO)
+        uses: egor-tensin/setup-mingw@v2
+        with:
+          platform: x64
+          static: 0
+      - name: Test (pure-Go logic)
+        env:
+          CGO_ENABLED: "0"
+        run: go test ./internal/...
+      - name: Build all packages (incl. GUI, CGO)
+        env:
+          CGO_ENABLED: "1"
+        run: go build ./...
