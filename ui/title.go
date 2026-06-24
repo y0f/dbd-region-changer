@@ -36,7 +36,7 @@ func (a *App) buildTitle() fyne.CanvasObject {
 	menu := widget.NewButton("...", a.showMenu)
 	menu.Importance = widget.LowImportance
 
-	left := container.NewHBox(title, ver)
+	left := container.NewHBox(title, container.NewCenter(ver))
 	right := container.NewHBox(gh, menu)
 	return container.NewBorder(nil, nil, left, right)
 }
