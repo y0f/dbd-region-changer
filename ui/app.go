@@ -212,7 +212,7 @@ func (a *App) buildUI() fyne.CanvasObject {
 		container.NewVBox(a.selectWidget, container.NewGridWithColumns(2, a.setBtn, a.defBtn)))
 
 	a.currentLabel = widget.NewLabel("You are on: ...")
-	a.selectedPingText = newColoredText("Ping:", colGrey)
+	a.selectedPingText = newColoredText("Ping: —", colGrey)
 	currentPanel := panel("",
 		container.NewBorder(nil, nil, a.currentLabel, a.selectedPingText))
 
