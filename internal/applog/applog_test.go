@@ -11,8 +11,7 @@ func TestNewWritesToLogFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.Remove(l.LogPath())
-	defer l.Close()
+	t.Cleanup(l.Cleanup)
 
 	if l.LogPath() == "" {
 		t.Fatal("empty log path")
@@ -33,8 +32,7 @@ func TestDumpTo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer os.Remove(l.LogPath())
-	defer l.Close()
+	t.Cleanup(l.Cleanup)
 	l.Info("dump me")
 
 	dir := t.TempDir()

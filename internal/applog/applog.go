@@ -24,9 +24,18 @@ type Logger struct {
 	file *os.File
 }
 
+// tempPrefix names the per-run log directories under os.TempDir().
+const tempPrefix = "dcreg_tmp_"
+
+// staleAge is how long a leftover log directory (from a crash, kill or logoff)
+// is kept before New sweeps it.
+const staleAge = 72 * time.Hour
+
 // New opens a log file in a fresh temp dir; debug mode also mirrors to a console.
+// It also removes log dirs left behind by earlier runs that did not exit cleanly.
 func New(debug bool) (*Logger, error) {
-	dir, err := os.MkdirTemp(os.TempDir(), "dcreg_tmp_")
+	sweepStale(os.TempDir(), time.Now().Add(-staleAge))
+	dir, err := os.MkdirTemp(os.TempDir(), tempPrefix)
 	if err != nil {
 		return nil, err
 	}
@@ -34,6 +43,7 @@ func New(debug bool) (*Logger, error) {
 	path := filepath.Join(dir, fmt.Sprintf("[%s]LogFile_dcreg.log", ts))
 	f, err := os.Create(path)
 	if err != nil {
+		os.RemoveAll(dir)
 		return nil, err
 	}
 
@@ -67,16 +77,57 @@ func (l *Logger) DumpTo(dir string) error {
 	return os.WriteFile(dst, data, 0o644)
 }
 
-func (l *Logger) Close() error { return l.file.Close() }
-
-// Cleanup closes the log file and removes its temp directory.
-func (l *Logger) Cleanup() {
+// Close closes the log file and removes its temp directory. It is safe to call
+// more than once.
+func (l *Logger) Close() error {
+	var err error
 	if l.file != nil {
-		l.file.Close()
+		err = l.file.Close()
+		l.file = nil
 	}
 	if l.dir != "" {
-		os.RemoveAll(l.dir)
+		if rerr := os.RemoveAll(l.dir); rerr != nil && err == nil {
+			err = rerr
+		}
+		l.dir = ""
 	}
+	return err
+}
+
+// Cleanup is Close without the error, for use in defers and shutdown hooks.
+func (l *Logger) Cleanup() { _ = l.Close() }
+
+// sweepStale removes tempPrefix dirs in root whose newest entry is older than
+// cutoff. A dir still held open by a running instance cannot be removed on
+// Windows, and is skipped elsewhere because its log keeps getting written.
+func sweepStale(root string, cutoff time.Time) {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if !e.IsDir() || !strings.HasPrefix(e.Name(), tempPrefix) {
+			continue
+		}
+		dir := filepath.Join(root, e.Name())
+		if newestModTime(dir).Before(cutoff) {
+			os.RemoveAll(dir)
+		}
+	}
+}
+
+func newestModTime(dir string) time.Time {
+	var newest time.Time
+	if fi, err := os.Stat(dir); err == nil {
+		newest = fi.ModTime()
+	}
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		if fi, err := e.Info(); err == nil && fi.ModTime().After(newest) {
+			newest = fi.ModTime()
+		}
+	}
+	return newest
 }
 
 func stdoutAttached() bool {
@@ -88,9 +139,13 @@ func stdoutAttached() bool {
 }
 
 // lineHandler formats records as "[DBDRegion-Debug][LEVEL] time message k=v".
+// Attributes added through With are kept preformatted in attrs; WithGroup
+// prefixes later keys with "group.".
 type lineHandler struct {
-	w  io.Writer
-	mu *sync.Mutex
+	w      io.Writer
+	mu     *sync.Mutex
+	attrs  string
+	prefix string
 }
 
 func (h *lineHandler) Enabled(_ context.Context, _ slog.Level) bool { return true }
@@ -99,8 +154,9 @@ func (h *lineHandler) Handle(_ context.Context, r slog.Record) error {
 	var b strings.Builder
 	fmt.Fprintf(&b, "[DBDRegion-Debug][%s]%s %s",
 		levelName(r.Level), r.Time.Format("2006-01-02T15:04:05"), r.Message)
+	b.WriteString(h.attrs)
 	r.Attrs(func(a slog.Attr) bool {
-		fmt.Fprintf(&b, " %s=%v", a.Key, a.Value.Any())
+		writeAttr(&b, h.prefix, a)
 		return true
 	})
 	b.WriteByte('\n')
@@ -110,8 +166,46 @@ func (h *lineHandler) Handle(_ context.Context, r slog.Record) error {
 	return err
 }
 
-func (h *lineHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
-func (h *lineHandler) WithGroup(string) slog.Handler      { return h }
+func (h *lineHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	if len(attrs) == 0 {
+		return h
+	}
+	var b strings.Builder
+	b.WriteString(h.attrs)
+	for _, a := range attrs {
+		writeAttr(&b, h.prefix, a)
+	}
+	h2 := *h
+	h2.attrs = b.String()
+	return &h2
+}
+
+func (h *lineHandler) WithGroup(name string) slog.Handler {
+	if name == "" {
+		return h
+	}
+	h2 := *h
+	h2.prefix = h.prefix + name + "."
+	return &h2
+}
+
+// writeAttr appends " prefix+key=value", flattening groups into dotted keys.
+func writeAttr(b *strings.Builder, prefix string, a slog.Attr) {
+	a.Value = a.Value.Resolve()
+	if a.Equal(slog.Attr{}) {
+		return
+	}
+	if a.Value.Kind() == slog.KindGroup {
+		if a.Key != "" {
+			prefix += a.Key + "."
+		}
+		for _, ga := range a.Value.Group() {
+			writeAttr(b, prefix, ga)
+		}
+		return
+	}
+	fmt.Fprintf(b, " %s%s=%v", prefix, a.Key, a.Value.Any())
+}
 
 func levelName(l slog.Level) string {
 	switch {

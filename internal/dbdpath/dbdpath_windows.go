@@ -1,10 +1,9 @@
 //go:build windows
 
-// Package dbdpath locates the Dead by Daylight executable so firewall rules can
-// be scoped to the game rather than the whole system.
 package dbdpath
 
 import (
+	"encoding/json"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -14,15 +13,17 @@ import (
 	"golang.org/x/sys/windows/registry"
 )
 
-const shippingExe = "DeadByDaylight-Win64-Shipping.exe"
-
-// Find returns the DBD shipping exe path, or "" if not located.
+// Find returns the DBD shipping exe path, or "" if not located. A path saved
+// with Save wins; otherwise Steam, Epic and Xbox app install folders are searched.
 func Find() string {
-	for _, lib := range steamLibraries() {
-		base := filepath.Join(lib, "steamapps", "common", "Dead by Daylight")
-		direct := filepath.Join(base, "DeadByDaylight", "Binaries", "Win64", shippingExe)
-		if isFile(direct) {
-			return direct
+	if p := Saved(); p != "" {
+		return p
+	}
+	for _, base := range installDirs() {
+		for _, name := range gameExes {
+			if direct := filepath.Join(base, "DeadByDaylight", "Binaries", "Win64", name); isFile(direct) {
+				return direct
+			}
 		}
 		if found := walkFor(base); found != "" {
 			return found
@@ -31,13 +32,51 @@ func Find() string {
 	return ""
 }
 
+// installDirs lists candidate DBD install folders across storefronts.
+func installDirs() []string {
+	var dirs []string
+	for _, lib := range steamLibraries() {
+		dirs = append(dirs, filepath.Join(lib, "steamapps", "common", "Dead by Daylight"))
+	}
+	dirs = append(dirs, epicInstalls(`C:\ProgramData\Epic\UnrealEngineLauncher\LauncherInstalled.dat`)...)
+	dirs = append(dirs, `C:\Program Files\Epic Games\DeadByDaylight`)
+	for _, drive := range []string{"C", "D", "E"} {
+		dirs = append(dirs, drive+`:\XboxGames\Dead by Daylight`)
+	}
+	return dedup(dirs)
+}
+
+// epicInstalls returns the Epic Games Launcher install folders that look like DBD.
+func epicInstalls(manifest string) []string {
+	data, err := os.ReadFile(manifest)
+	if err != nil {
+		return nil
+	}
+	var m struct {
+		InstallationList []struct {
+			InstallLocation string
+		}
+	}
+	if json.Unmarshal(data, &m) != nil {
+		return nil
+	}
+	var out []string
+	for _, e := range m.InstallationList {
+		name := strings.ToLower(strings.ReplaceAll(filepath.Base(e.InstallLocation), " ", ""))
+		if strings.Contains(name, "deadbydaylight") {
+			out = append(out, filepath.Clean(e.InstallLocation))
+		}
+	}
+	return out
+}
+
 func walkFor(root string) string {
 	var found string
 	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
-		if !d.IsDir() && strings.EqualFold(d.Name(), shippingExe) {
+		if !d.IsDir() && IsGameExe(d.Name()) {
 			found = p
 			return filepath.SkipAll
 		}
@@ -95,11 +134,6 @@ func parseLibraryFolders(vdf string) []string {
 		out = append(out, strings.ReplaceAll(m[1], `\\`, `\`))
 	}
 	return out
-}
-
-func isFile(p string) bool {
-	fi, err := os.Stat(p)
-	return err == nil && !fi.IsDir()
 }
 
 func dedup(in []string) []string {

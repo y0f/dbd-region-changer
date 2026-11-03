@@ -2,12 +2,7 @@
 
 package singleinstance
 
-import (
-	"os"
-	"path/filepath"
-
-	"github.com/gofrs/flock"
-)
+import "github.com/gofrs/flock"
 
 type linuxLock struct {
 	fl     *flock.Flock
@@ -16,15 +11,11 @@ type linuxLock struct {
 
 // Acquire takes a flock on a lockfile in the runtime/cache dir; failure to lock means another instance holds it.
 func Acquire(name string) (Lock, error) {
-	dir := os.Getenv("XDG_RUNTIME_DIR")
-	if dir == "" {
-		if d, err := os.UserCacheDir(); err == nil {
-			dir = d
-		} else {
-			dir = os.TempDir()
-		}
+	path, err := lockFile(name)
+	if err != nil {
+		return nil, err
 	}
-	fl := flock.New(filepath.Join(dir, name+".lock"))
+	fl := flock.New(path)
 	locked, err := fl.TryLock()
 	if err != nil {
 		return nil, err

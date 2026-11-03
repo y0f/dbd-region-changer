@@ -1,6 +1,7 @@
 package region
 
-// builtin is the curated set of regions DBD runs GameLift fleets in; the sole source of membership.
+// builtin is the curated set of regions DBD runs GameLift fleets in. Discover
+// always keeps these and returns them alone when discovery yields nothing.
 var builtin = []Server{
 	{Code: "ap-east-1", Pretty: "Asia Pacific (Hong Kong)"},
 	{Code: "ap-northeast-1", Pretty: "Asia Pacific (Tokyo)"},

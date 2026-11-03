@@ -4,9 +4,6 @@ package config
 import "fmt"
 
 const (
-	// GameliftDocsURL is scraped for region discovery (best-effort; see internal/region).
-	GameliftDocsURL = "https://docs.aws.amazon.com/general/latest/gr/gamelift.html"
-
 	GithubRepoURL       = "https://github.com/y0f/dbd-region-changer"
 	UpdateURL           = "https://github.com/y0f/dbd-region-changer/releases/latest"
 	APILatestReleaseURL = "https://api.github.com/repos/y0f/dbd-region-changer/releases/latest"
@@ -25,7 +22,8 @@ type DNSProvider struct {
 // DNSProviders are tried in order with failover.
 var DNSProviders = []DNSProvider{
 	{Name: "cloudflare", URL: "https://cloudflare-dns.com/dns-query"},
-	{Name: "quad9", URL: "https://dns.quad9.net/dns-query"},
+	// Quad9 is not usable here: its /dns-query only speaks RFC 8484 wire format.
+	{Name: "google", URL: "https://dns.google/resolve"},
 }
 
 // BuildGameliftHosts returns the .amazonaws.com endpoint and .api.aws dualstack hostnames for a region.

@@ -18,11 +18,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
-COPY . .
-
 ENV CGO_ENABLED=1
 
-# Fail the image build early if anything does not compile on Linux.
+# Download modules in their own layer, so editing the source reuses it.
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+# Fail the image build early if anything does not compile on Linux. The build
+# cache this fills is reused by the tests and the binary build in linux-verify.sh.
 RUN go build ./... && go vet ./...
 
 CMD ["bash", "scripts/linux-verify.sh"]

@@ -1,5 +1,8 @@
-// Package region provides the GameLift region catalog. The built-in list is the source of
-// membership; scraping the AWS docs only refreshes pretty names, and any failure falls back to built-in.
+// Package region provides the GameLift region catalog. Membership comes from
+// the AWS region codes in ip-ranges.json, kept when their GameLift ping beacon
+// answers, plus the curated built-in list, which is always kept so a lost probe
+// or a leftover firewall block never hides a core region. Pretty names come
+// from a static map.
 package region
 
 import "github.com/y0f/dbd-region-changer/internal/config"

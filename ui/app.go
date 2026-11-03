@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"sort"
 	"sync"
 	"time"
 
@@ -30,6 +31,23 @@ import (
 	"github.com/y0f/dbd-region-changer/internal/updater"
 )
 
+// System changes, replaceable in tests. fwSilent reports whether the firewall
+// backend changes rules without a password prompt (Windows: the app runs
+// elevated).
+var (
+	fwSupported = firewall.Supported
+	fwSilent    = firewall.RefreshSupported
+	fwApply     = firewall.Apply
+	fwAdd       = firewall.Add
+	fwClear     = firewall.Clear
+	writeHosts  = elevate.WriteHosts
+)
+
+// beaconSamples is how many uncached lookups collect a region's beacon
+// addresses on top of the full A/AAAA answer: the beacon name rotates through
+// a pool of IPs and each answer usually names only one of them.
+const beaconSamples = 4
+
 type App struct {
 	fyneApp fyne.App
 	win     fyne.Window
@@ -37,7 +55,7 @@ type App struct {
 
 	host     *hostsfile.Hosts
 	resolver *doh.Resolver
-	regions  []region.Server
+	regions  []region.Server // set once on the UI goroutine before the loops start
 
 	selectWidget     *widget.Select
 	setBtn, defBtn   *widget.Button
@@ -45,13 +63,19 @@ type App struct {
 	selectedPingText *canvas.Text
 	pingList         *PingList
 
-	selectedCode string
-	dbdPath      string
+	selectedCode string // UI goroutine only
+
+	// fwMu serialises firewall changes (apply, clear, refresh), so a refresh
+	// can never re-add rules after Set Default or block a newly chosen region.
+	// appliedCode and blocked only change while it is held.
+	fwMu sync.Mutex
 
 	mu          sync.Mutex
+	dbdPath     string
 	recent      []ping.Result
-	appliedCode string          // region currently forced via the firewall
+	appliedCode string          // region currently forced via the firewall or hosts file
 	blocked     map[string]bool // beacon IPs already blocked
+	shownCode   string          // region the "You are on" label shows; drives the Ping readout
 }
 
 func New(log *applog.Logger) *App {
@@ -62,25 +86,18 @@ func New(log *applog.Logger) *App {
 	w.Resize(fyne.NewSize(680, 540))
 	w.SetFixedSize(true)
 
-	a := &App{
+	return &App{
 		fyneApp:  fa,
 		win:      w,
 		log:      log,
 		host:     hostsfile.New(),
 		resolver: doh.Default(),
 	}
-	a.dbdPath = dbdpath.Find()
-	a.regions = a.discoverRegions()
-	if len(a.regions) > 0 {
-		a.selectedCode = a.regions[0].Code
-	}
-	log.Info("regions loaded", "count", len(a.regions), "dbd", a.dbdPath)
-	return a
 }
 
-// discoverRegions fetches ip-ranges.json once (codes for discovery, EC2 CIDRs
-// for firewall blocking) and keeps the regions whose GameLift beacon answers,
-// so every live region gets redirected. Falls back to the built-in list.
+// discoverRegions fetches the AWS region codes and keeps the regions whose
+// GameLift beacon answers, so every live region gets blocked. Falls back to
+// the built-in list.
 func (a *App) discoverRegions() []region.Server {
 	codes, err := awsranges.RegionCodes(nil)
 	if err != nil {
@@ -97,15 +114,86 @@ func (a *App) discoverRegions() []region.Server {
 	})
 }
 
+func (a *App) programPath() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.dbdPath
+}
+
+// beaconIPs returns the addresses seen for one beacon hostname: every A/AAAA
+// record plus a few fresh lookups, since the name rotates through a pool.
+func (a *App) beaconIPs(host string) []string {
+	var ips []string
+	if all, err := a.resolver.ResolveAll(host); err == nil {
+		ips = append(ips, all...)
+	}
+	for i := 0; i < beaconSamples; i++ {
+		if ip, err := a.resolver.ResolveFresh(host); err == nil {
+			ips = append(ips, ip)
+		}
+	}
+	return ips
+}
+
+// blockIPs resolves the beacon addresses of every region except code, sorted
+// and deduplicated. Regions are resolved in parallel.
+func (a *App) blockIPs(code string) []string {
+	var (
+		wg   sync.WaitGroup
+		mu   sync.Mutex
+		seen = map[string]bool{}
+		out  []string
+	)
+	for _, r := range a.regions {
+		if r.Code == code {
+			continue
+		}
+		wg.Add(1)
+		go func(host string) {
+			defer wg.Done()
+			ips := a.beaconIPs(host)
+			mu.Lock()
+			defer mu.Unlock()
+			for _, ip := range ips {
+				if !seen[ip] {
+					seen[ip] = true
+					out = append(out, ip)
+				}
+			}
+		}(r.Dualstack())
+	}
+	wg.Wait()
+	sort.Strings(out)
+	return out
+}
+
+// setApplied records the firewall state and remembers it across restarts.
+// The caller holds fwMu.
+func (a *App) setApplied(code string, ips []string) {
+	a.mu.Lock()
+	a.appliedCode = code
+	a.blocked = make(map[string]bool, len(ips))
+	for _, ip := range ips {
+		a.blocked[ip] = true
+	}
+	a.mu.Unlock()
+	if err := saveApplied(code); err != nil {
+		a.log.Warn("saving applied region failed", "err", err)
+	}
+}
+
 // applyFirewall blocks the game's traffic to the ping beacons of every region
 // except code, so the client can only measure/reach the chosen region. Only the
-// handful of beacon IPs are blocked (not whole regions), so matchmaking/EAC
-// backends stay reachable.
+// beacon IPs are blocked (not whole regions), so matchmaking/EAC backends stay
+// reachable.
 func (a *App) applyFirewall(code string) {
-	if !firewall.Supported() {
+	if !fwSupported() {
 		return
 	}
-	if firewall.NeedsProgram() && a.dbdPath == "" {
+	a.fwMu.Lock()
+	defer a.fwMu.Unlock()
+	program := a.programPath()
+	if firewall.NeedsProgram() && program == "" {
 		a.log.Warn("Dead by Daylight exe not found; firewall block skipped (set it via the ... menu)")
 		fyne.Do(func() {
 			dialog.NewInformation("Firewall block skipped",
@@ -114,100 +202,176 @@ func (a *App) applyFirewall(code string) {
 		})
 		return
 	}
-	var blockIPs []string
-	for _, r := range a.regions {
-		if r.Code == code {
-			continue
-		}
-		if ip, err := a.resolver.Resolve(r.Dualstack()); err == nil {
-			blockIPs = append(blockIPs, ip)
-		}
-	}
-	if err := firewall.Apply(a.dbdPath, blockIPs); err != nil {
+	ips := a.blockIPs(code)
+	if err := fwApply(program, ips); err != nil {
 		a.log.Error("firewall apply failed", "err", err)
-		fyne.Do(func() {
-			dialog.NewError(fmt.Errorf("firewall block failed (close DBD and try again): %w", err), a.win).Show()
-		})
+		msg := "firewall block failed (close DBD and try again)"
+		if fwSilent() {
+			// A failed apply can leave the old block, a partial new one, or
+			// none. Clear it, so the rules and the label agree. Where clearing
+			// needs a password prompt the previous state is kept instead: a
+			// dismissed prompt changed nothing.
+			if cerr := fwClear(); cerr != nil {
+				a.log.Error("firewall clear failed", "err", cerr)
+			}
+			a.setApplied("", nil)
+			msg = "firewall block failed and the region lock was removed (close DBD and try again)"
+		}
+		fyne.Do(func() { dialog.NewError(fmt.Errorf("%s: %w", msg, err), a.win).Show() })
 		return
 	}
-	a.mu.Lock()
-	a.appliedCode = code
-	a.blocked = make(map[string]bool, len(blockIPs))
-	for _, ip := range blockIPs {
-		a.blocked[ip] = true
-	}
-	a.mu.Unlock()
-	a.log.Info("firewall block applied", "allow", code, "blocked_beacons", len(blockIPs))
+	a.setApplied(code, ips)
+	a.log.Info("firewall block applied", "allow", code, "blocked_beacons", len(ips))
 }
 
-// firewallRefreshLoop keeps the block current as beacon IPs rotate. It only ADDS
-// newly-seen beacon IPs (never clears), so the block is never momentarily lifted
-// and the active game-server connection is never disturbed.
+// restoreApplied picks up a block left by an earlier session. Firewall rules
+// outlive the app, so without this the label would read Automatic while the
+// game stays locked, and the block would never be refreshed.
+func (a *App) restoreApplied() {
+	code := loadApplied()
+	if code == "" || !fwSupported() {
+		return
+	}
+	known := false
+	for _, r := range a.regions {
+		known = known || r.Code == code
+	}
+	switch {
+	case fwSilent() && known && (!firewall.NeedsProgram() || a.programPath() != ""):
+		// Re-resolve the beacons, which have rotated since, and replace the block.
+		a.log.Info("restoring region lock from last session", "code", code)
+		a.applyFirewall(code)
+	case fwSilent():
+		// The block cannot be rebuilt (region gone or DBD path unknown): remove it.
+		a.log.Warn("removing region lock from last session", "code", code)
+		a.fwMu.Lock()
+		if err := fwClear(); err != nil {
+			a.log.Error("firewall clear failed", "err", err)
+		}
+		a.setApplied("", nil)
+		a.fwMu.Unlock()
+	default:
+		// Changing rules needs a password prompt here, so only show the block.
+		a.log.Info("region lock from last session still active", "code", code)
+		a.fwMu.Lock()
+		a.mu.Lock()
+		a.appliedCode = code
+		a.blocked = map[string]bool{}
+		a.mu.Unlock()
+		a.fwMu.Unlock()
+	}
+}
+
+// firewallRefreshLoop keeps the block current as beacon IPs rotate, where that
+// needs no password prompt.
 func (a *App) firewallRefreshLoop() {
 	for {
 		time.Sleep(60 * time.Second)
-		a.mu.Lock()
-		code := a.appliedCode
-		a.mu.Unlock()
-		if code == "" || !firewall.RefreshSupported() {
-			continue
+		if fwSilent() {
+			a.refreshBlock()
 		}
-		var newIPs []string
-		for _, r := range a.regions {
-			if r.Code == code {
-				continue
-			}
-			ip, err := a.resolver.ResolveFresh(r.Dualstack())
-			if err != nil {
-				continue
-			}
-			a.mu.Lock()
-			seen := a.blocked[ip]
-			a.mu.Unlock()
-			if !seen {
-				newIPs = append(newIPs, ip)
-			}
-		}
-		if len(newIPs) == 0 {
-			continue
-		}
-		if err := firewall.Add(a.dbdPath, newIPs); err != nil {
-			a.log.Error("firewall refresh failed", "err", err)
-			continue
-		}
-		a.mu.Lock()
-		for _, ip := range newIPs {
-			a.blocked[ip] = true
-		}
-		a.mu.Unlock()
-		a.log.Info("firewall refresh added beacons", "new", len(newIPs))
 	}
 }
 
-// Run shows the window and starts the ping loops once the event loop is up (so fyne.Do is safe).
+// refreshBlock blocks beacon IPs that rotated in since the last apply. It only
+// ADDS (never clears), so the block is never momentarily lifted and the active
+// game-server connection is never disturbed. Resolving runs without locks; if
+// Set Server or Set Default changed the block meanwhile, the result is dropped.
+func (a *App) refreshBlock() {
+	a.mu.Lock()
+	code := a.appliedCode
+	a.mu.Unlock()
+	if code == "" {
+		return
+	}
+	ips := a.blockIPs(code)
+
+	a.fwMu.Lock()
+	defer a.fwMu.Unlock()
+	a.mu.Lock()
+	if a.appliedCode != code {
+		a.mu.Unlock()
+		return
+	}
+	var newIPs []string
+	for _, ip := range ips {
+		if !a.blocked[ip] {
+			newIPs = append(newIPs, ip)
+		}
+	}
+	program := a.dbdPath
+	a.mu.Unlock()
+	if len(newIPs) == 0 {
+		return
+	}
+	if err := fwAdd(program, newIPs); err != nil {
+		a.log.Error("firewall refresh failed", "err", err)
+		return
+	}
+	a.mu.Lock()
+	if a.blocked == nil {
+		a.blocked = make(map[string]bool, len(newIPs))
+	}
+	for _, ip := range newIPs {
+		a.blocked[ip] = true
+	}
+	a.mu.Unlock()
+	a.log.Info("firewall refresh added beacons", "new", len(newIPs))
+}
+
+// Run shows the window at once and loads the regions in the background.
 func (a *App) Run() {
 	a.win.SetContent(a.buildUI())
 	a.win.SetCloseIntercept(a.onCloseRequested)
-	a.fyneApp.Lifecycle().SetOnStarted(func() {
-		go a.pingLoop()
-		go a.selectedPingLoop()
-		go a.firewallRefreshLoop()
-	})
+	a.fyneApp.Lifecycle().SetOnStarted(func() { go a.start() })
 	a.win.ShowAndRun()
 }
 
-func (a *App) buildUI() fyne.CanvasObject {
-	opts := make([]string, len(a.regions))
-	for i, r := range a.regions {
+// start finds DBD and the live regions (network bound, seconds), restores a
+// block from the last session, then enables the controls and starts the loops.
+func (a *App) start() {
+	path := dbdpath.Find()
+	regions := a.discoverRegions()
+	a.mu.Lock()
+	a.dbdPath = path
+	a.mu.Unlock()
+	a.log.Info("regions loaded", "count", len(regions), "dbd", path)
+
+	fyne.DoAndWait(func() { a.setRegions(regions) })
+	a.restoreApplied()
+	a.refreshCurrent()
+	if len(regions) > 0 {
+		a.enableButtons(true)
+	}
+	go a.pingLoop()
+	go a.selectedPingLoop()
+	go a.firewallRefreshLoop()
+}
+
+// setRegions fills the region list. It runs on the UI goroutine.
+func (a *App) setRegions(regions []region.Server) {
+	a.regions = regions
+	opts := make([]string, len(regions))
+	for i, r := range regions {
 		opts[i] = r.Label()
 	}
-	a.selectWidget = widget.NewSelect(opts, a.onSelectChanged)
+	a.selectWidget.PlaceHolder = "(Select one)"
+	a.selectWidget.SetOptions(opts)
 	if len(opts) > 0 {
 		a.selectWidget.SetSelectedIndex(0)
+		a.selectWidget.Enable()
 	}
+}
+
+func (a *App) buildUI() fyne.CanvasObject {
+	a.selectWidget = widget.NewSelect(nil, a.onSelectChanged)
+	a.selectWidget.PlaceHolder = "Loading regions..."
+	a.selectWidget.Disable()
 	a.setBtn = widget.NewButton("Set Server", a.onSetServer)
 	a.setBtn.Importance = widget.HighImportance
+	a.setBtn.Disable()
 	a.defBtn = widget.NewButton("Set Default", a.onSetDefault)
+	a.defBtn.Disable()
 	selectPanel := panel("SELECT SERVER",
 		container.NewVBox(a.selectWidget, container.NewGridWithColumns(2, a.setBtn, a.defBtn)))
 
@@ -248,35 +412,55 @@ func (a *App) enableButtons(enabled bool) {
 	})
 }
 
+// hostsRedirectActive reports whether the hosts file holds a redirect for any
+// region, as written by the hosts fallback.
+func (a *App) hostsRedirectActive() bool {
+	known := make(map[string]bool, 2*len(a.regions))
+	for _, hn := range apply.KnownHostnames(a.regions) {
+		known[hn] = true
+	}
+	hosts, err := a.host.List(func(hn string) bool { return known[hn] })
+	return err == nil && len(hosts) > 0
+}
+
+// clearHostsInFirewallMode removes hosts redirects left by the hosts fallback.
+// On Windows the GUI is already elevated, so it always runs; elsewhere only
+// when a redirect exists, to avoid a needless password prompt.
+func (a *App) clearHostsInFirewallMode() {
+	if runtime.GOOS != "windows" && !a.hostsRedirectActive() {
+		return
+	}
+	clear := elevate.Payload{Op: elevate.OpClear, RemoveHostnames: apply.KnownHostnames(a.regions)}
+	if err := writeHosts(clear); err != nil {
+		a.log.Error("hosts clear failed", "err", err)
+	}
+}
+
 func (a *App) onSetServer() {
+	code := a.selectedCode // read on the UI goroutine, which owns it
 	a.enableButtons(false)
 	go func() {
 		defer a.afterApply()
-		if !firewall.Supported() {
+		if !fwSupported() {
 			// No firewall backend: fall back to the hosts redirect (best effort).
-			a.setServerViaHosts()
+			a.setServerViaHosts(code)
 			return
 		}
-		// On Windows the GUI is already elevated, so clear any prior hosts
-		// redirect for free. On Linux skip it to avoid a second pkexec prompt.
-		if runtime.GOOS == "windows" {
-			clear := elevate.Payload{Op: elevate.OpClear, RemoveHostnames: apply.KnownHostnames(a.regions)}
-			if err := elevate.WriteHosts(clear); err != nil {
-				a.log.Error("hosts clear failed", "err", err)
-			}
-		}
-		a.applyFirewall(a.selectedCode)
-		a.log.Info("set server", "code", a.selectedCode)
+		a.clearHostsInFirewallMode()
+		a.applyFirewall(code)
+		a.log.Info("set server", "code", code)
 	}()
 }
 
 // setServerViaHosts is the fallback when no firewall backend exists: redirect
 // every region's hostnames at the chosen region in the hosts file.
-func (a *App) setServerViaHosts() {
-	entries, err := apply.BuildEntries(a.selectedCode, a.regions, a.resolver)
+func (a *App) setServerViaHosts(code string) {
+	entries, err := apply.BuildEntries(code, a.regions, a.resolver)
 	if err != nil {
 		a.log.Error("build entries failed", "err", err)
-		fyne.Do(a.showPermissionError)
+		fyne.Do(func() {
+			dialog.NewError(fmt.Errorf("could not look up the region's servers (check your connection and try again): %w", err), a.win).Show()
+		})
 		return
 	}
 	payload := elevate.Payload{
@@ -284,39 +468,59 @@ func (a *App) setServerViaHosts() {
 		RemoveHostnames: apply.KnownHostnames(a.regions),
 		Entries:         entries,
 	}
-	if err := elevate.WriteHosts(payload); err != nil {
+	if err := writeHosts(payload); err != nil {
 		a.log.Error("set server failed", "err", err)
 		fyne.Do(a.showPermissionError)
 		return
 	}
+	a.fwMu.Lock()
 	a.mu.Lock()
-	a.appliedCode = a.selectedCode
+	a.appliedCode = code
 	a.mu.Unlock()
-	a.log.Info("set server via hosts", "code", a.selectedCode)
+	a.fwMu.Unlock()
+	a.log.Info("set server via hosts", "code", code)
 }
 
 func (a *App) onSetDefault() {
 	a.enableButtons(false)
 	go func() {
 		defer a.afterApply()
-		if firewall.Supported() {
-			if err := firewall.Clear(); err != nil {
+		if fwSupported() {
+			if err := a.clearFirewall(); err != nil {
 				a.log.Error("firewall clear failed", "err", err)
+				fyne.Do(func() {
+					dialog.NewError(fmt.Errorf("removing the firewall block failed: %w", err), a.win).Show()
+				})
+				return
 			}
-			if runtime.GOOS == "windows" {
-				_ = elevate.WriteHosts(elevate.Payload{Op: elevate.OpClear, RemoveHostnames: apply.KnownHostnames(a.regions)})
+		} else {
+			if err := writeHosts(elevate.Payload{Op: elevate.OpClear, RemoveHostnames: apply.KnownHostnames(a.regions)}); err != nil {
+				a.log.Error("set default failed", "err", err)
+				fyne.Do(a.showPermissionError)
+				return
 			}
-		} else if err := elevate.WriteHosts(elevate.Payload{Op: elevate.OpClear, RemoveHostnames: apply.KnownHostnames(a.regions)}); err != nil {
-			a.log.Error("set default failed", "err", err)
-			fyne.Do(a.showPermissionError)
-			return
+			a.fwMu.Lock()
+			a.mu.Lock()
+			a.appliedCode = ""
+			a.blocked = nil
+			a.mu.Unlock()
+			a.fwMu.Unlock()
 		}
-		a.mu.Lock()
-		a.appliedCode = ""
-		a.blocked = nil
-		a.mu.Unlock()
 		a.log.Info("set default")
 	}()
+}
+
+// clearFirewall removes the block and any hosts redirect. If removing the
+// block fails (a dismissed password prompt), the state is left as it was.
+func (a *App) clearFirewall() error {
+	a.fwMu.Lock()
+	defer a.fwMu.Unlock()
+	if err := fwClear(); err != nil {
+		return err
+	}
+	a.clearHostsInFirewallMode()
+	a.setApplied("", nil)
+	return nil
 }
 
 func (a *App) afterApply() {
@@ -331,14 +535,27 @@ func (a *App) onSetDBDPath() {
 			return
 		}
 		defer rc.Close()
-		a.dbdPath = rc.URI().Path()
-		a.log.Info("dbd path set", "path", a.dbdPath)
-		dialog.NewInformation("DBD path set", a.dbdPath, a.win).Show()
+		path := rc.URI().Path()
+		a.mu.Lock()
+		a.dbdPath = path
+		a.mu.Unlock()
+		if serr := dbdpath.Save(path); serr != nil {
+			a.log.Warn("saving dbd path failed", "err", serr)
+		}
+		a.log.Info("dbd path set", "path", path)
+		dialog.NewInformation("DBD path set", path, a.win).Show()
 	}, a.win)
 }
 
 func (a *App) onCloseRequested() {
-	dialog.NewConfirm("Close", "You sure?", func(yes bool) {
+	msg := "You sure?"
+	a.mu.Lock()
+	locked := a.appliedCode != ""
+	a.mu.Unlock()
+	if locked && fwSupported() {
+		msg = "The region lock stays active after closing,\nuntil you click Set Default. Close anyway?"
+	}
+	dialog.NewConfirm("Close", msg, func(yes bool) {
 		if !yes {
 			return
 		}
@@ -399,32 +616,31 @@ func (a *App) fastestCode() string {
 	return pickFastest(a.regions, a.recent)
 }
 
-func (a *App) currentOrFastest() string {
-	if hosts, err := a.host.List(a.isKnownEndpoint); err == nil && len(hosts) > 0 {
-		if r, ok := a.regionByEndpoint(hosts[0][1]); ok {
-			return r.Code
-		}
-	}
-	return a.fastestCode()
-}
-
-func (a *App) refreshCurrent() {
+// currentRegion returns the region the game is held to: the one applied via
+// the firewall, else a hosts redirect, else the fastest (what matchmaking picks).
+func (a *App) currentRegion() (pretty, code string) {
 	a.mu.Lock()
 	applied := a.appliedCode
 	a.mu.Unlock()
-
-	var text string
 	if applied != "" {
-		text = fmt.Sprintf("You are on: %s (%s)", region.PrettyName(applied), applied)
-	} else {
-		pretty, code := "Automatic", a.fastestCode()
-		if hosts, err := a.host.List(a.isKnownEndpoint); err == nil && len(hosts) > 0 {
-			if r, ok := a.regionByEndpoint(hosts[0][1]); ok {
-				pretty, code = r.Pretty, r.Code
-			}
-		}
-		text = fmt.Sprintf("You are on: %s (%s)", pretty, code)
+		return region.PrettyName(applied), applied
 	}
+	if hosts, err := a.host.List(a.isKnownEndpoint); err == nil && len(hosts) > 0 {
+		if r, ok := a.regionByEndpoint(hosts[0][1]); ok {
+			return r.Pretty, r.Code
+		}
+	}
+	return "Automatic", a.fastestCode()
+}
+
+// refreshCurrent updates the "You are on" label, and the region whose ping the
+// Ping readout shows, so both always name the same region.
+func (a *App) refreshCurrent() {
+	pretty, code := a.currentRegion()
+	a.mu.Lock()
+	a.shownCode = code
+	a.mu.Unlock()
+	text := fmt.Sprintf("You are on: %s (%s)", pretty, code)
 	fyne.Do(func() { a.currentLabel.SetText(text) })
 }
 
@@ -456,22 +672,25 @@ func (a *App) pingLoop() {
 	}
 }
 
+// selectedPingMs returns the latest ping of the region the label shows, or -1.
+func (a *App) selectedPingMs() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for i := range a.regions {
+		if a.regions[i].Code == a.shownCode {
+			if i < len(a.recent) {
+				return a.recent[i].DisplayPing()
+			}
+			break
+		}
+	}
+	return -1
+}
+
 func (a *App) selectedPingLoop() {
 	time.Sleep(1 * time.Second)
 	for {
-		code := a.currentOrFastest()
-		ms := -1
-		a.mu.Lock()
-		for i := range a.regions {
-			if a.regions[i].Code == code {
-				if i < len(a.recent) {
-					ms = a.recent[i].DisplayPing()
-				}
-				break
-			}
-		}
-		a.mu.Unlock()
-
+		ms := a.selectedPingMs()
 		text := fmt.Sprintf("Ping: %dms", ms)
 		col := pingColor(ms)
 		fyne.Do(func() {

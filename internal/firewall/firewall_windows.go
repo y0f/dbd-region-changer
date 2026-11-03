@@ -19,21 +19,42 @@ func NeedsProgram() bool { return true }
 // RefreshSupported reports that the block can be refreshed silently (no prompt).
 func RefreshSupported() bool { return true }
 
-// Apply clears prior rules then blocks cidrs. Requires admin.
-func Apply(program string, cidrs []string) error {
-	if err := Clear(); err != nil {
+// pendingRuleName holds a new rule set while it is being added, so the old
+// rules stay in force until the replacement is complete.
+const pendingRuleName = ruleName + " (pending)"
+
+// Apply replaces the current rules with a block of ips. The new rules are added
+// under a staging name first; the old rules are only deleted once every add
+// succeeded, so a failed Apply leaves the previous block in place. Requires admin.
+func Apply(program string, ips []string) error {
+	if len(ips) == 0 {
+		return Clear()
+	}
+	deleteRules(pendingRuleName)
+	if err := add(pendingRuleName, program, ips); err != nil {
+		deleteRules(pendingRuleName)
 		return err
 	}
-	return Add(program, cidrs)
+	deleteRules(ruleName)
+	if _, err := runNetsh("advfirewall", "firewall", "set", "rule",
+		"name="+pendingRuleName, "new", "name="+ruleName); err != nil {
+		// The new block is active under the staging name; Clear removes both.
+		return err
+	}
+	return nil
 }
 
-// Add appends outbound block rules for cidrs WITHOUT clearing existing rules.
+// Add appends outbound block rules for ips WITHOUT clearing existing rules.
 // Used by the periodic refresh so the block is never momentarily lifted.
-func Add(program string, cidrs []string) error {
-	for _, group := range chunk(cidrs, maxCIDRsPerRule) {
+func Add(program string, ips []string) error {
+	return add(ruleName, program, ips)
+}
+
+func add(name, program string, ips []string) error {
+	for _, group := range chunk(ips, maxCIDRsPerRule) {
 		args := []string{
 			"advfirewall", "firewall", "add", "rule",
-			"name=" + ruleName,
+			"name=" + name,
 			"dir=out", "action=block", "enable=yes",
 			"remoteip=" + strings.Join(group, ","),
 		}
@@ -49,9 +70,15 @@ func Add(program string, cidrs []string) error {
 
 // Clear removes all rules this tool created.
 func Clear() error {
-	// A delete with no matching rule returns an error; that is not a failure.
-	_, _ = runNetsh("advfirewall", "firewall", "delete", "rule", "name="+ruleName)
+	deleteRules(ruleName)
+	deleteRules(pendingRuleName)
 	return nil
+}
+
+// deleteRules removes every rule called name. A delete with no matching rule
+// returns an error; that is not a failure.
+func deleteRules(name string) {
+	_, _ = runNetsh("advfirewall", "firewall", "delete", "rule", "name="+name)
 }
 
 // addWithRetry works around transient "Windows Defender Firewall error (0x2)"

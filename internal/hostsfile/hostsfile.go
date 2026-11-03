@@ -1,7 +1,10 @@
-// Package hostsfile reads and edits the OS hosts file; writes are in-place, not atomic temp+rename.
+// Package hostsfile reads and edits the OS hosts file. Each edit reads the file
+// once and writes it back at most once, in place (a rename would drop the
+// file's ACLs or SELinux label), and only when the content actually changes.
 package hostsfile
 
 import (
+	"bytes"
 	"os"
 	"strings"
 )
@@ -39,75 +42,69 @@ func (h *Hosts) List(callback func(hostname string) bool) ([][2]string, error) {
 	return out, nil
 }
 
-// Save appends "ip hostname", prefixing a newline when the file's last line is non-blank. No trailing newline.
+// Save appends the line "ip hostname".
 func (h *Hosts) Save(ip, hostname string) error {
-	entry := ip + " " + hostname
-	data, err := os.ReadFile(h.Path)
-	if err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	if needsLeadingNewline(data) {
-		entry = "\n" + entry
-	}
-	f, err := os.OpenFile(h.Path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	_, err = f.WriteString(entry)
-	return err
+	return h.Update(nil, []Entry{{IP: ip, Hostname: hostname}})
 }
 
 // Remove drops every line whose second field equals hostname; shorter lines are kept verbatim.
 func (h *Hosts) Remove(hostname string) error {
+	return h.Update([]string{hostname}, nil)
+}
+
+// RemoveAll drops every line whose second field is one of hostnames.
+func (h *Hosts) RemoveAll(hostnames []string) error {
+	return h.Update(hostnames, nil)
+}
+
+// Apply appends every entry; caller must remove stale entries first (see Update and internal/apply).
+func (h *Hosts) Apply(entries []Entry) error {
+	return h.Update(nil, entries)
+}
+
+// Update removes every line whose second field is one of remove, then appends
+// entries, in a single read and at most one write. Appended lines use the
+// file's line ending (CRLF if it already has any) and end with a newline, so a
+// later append by another tool starts on its own line.
+func (h *Hosts) Update(remove []string, entries []Entry) error {
 	data, err := os.ReadFile(h.Path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
+	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
+	out := edit(data, remove, entries)
+	if bytes.Equal(out, data) {
+		return nil // also covers a missing file with nothing to add
+	}
+	perm := os.FileMode(0o644)
+	if fi, serr := os.Stat(h.Path); serr == nil {
+		perm = fi.Mode().Perm()
+	}
+	return os.WriteFile(h.Path, out, perm)
+}
+
+func edit(data []byte, remove []string, entries []Entry) []byte {
+	drop := make(map[string]bool, len(remove))
+	for _, hn := range remove {
+		drop[hn] = true
+	}
+	eol := "\n"
+	if bytes.Contains(data, []byte("\r\n")) {
+		eol = "\r\n"
+	}
 	var b strings.Builder
+	b.Grow(len(data))
 	for _, line := range strings.SplitAfter(string(data), "\n") {
-		fields := strings.Fields(strings.TrimSpace(line))
-		if len(fields) >= 2 && fields[1] == hostname {
+		fields := strings.Fields(line)
+		if len(fields) >= 2 && drop[fields[1]] {
 			continue
 		}
 		b.WriteString(line)
 	}
-	return os.WriteFile(h.Path, []byte(b.String()), 0o644)
-}
-
-func (h *Hosts) RemoveAll(hostnames []string) error {
-	for _, hn := range hostnames {
-		if err := h.Remove(hn); err != nil {
-			return err
-		}
+	if len(entries) > 0 && b.Len() > 0 && !strings.HasSuffix(b.String(), "\n") {
+		b.WriteString(eol)
 	}
-	return nil
-}
-
-// Apply saves every entry; caller must remove stale entries first (see internal/apply).
-func (h *Hosts) Apply(entries []Entry) error {
 	for _, e := range entries {
-		if err := h.Save(e.IP, e.Hostname); err != nil {
-			return err
-		}
+		b.WriteString(e.IP + " " + e.Hostname + eol)
 	}
-	return nil
-}
-
-func needsLeadingNewline(data []byte) bool {
-	if len(data) == 0 {
-		return false
-	}
-	parts := strings.SplitAfter(string(data), "\n")
-	// SplitAfter yields a trailing "" when data ends in '\n'; drop it to examine the last real line.
-	if len(parts) > 0 && parts[len(parts)-1] == "" {
-		parts = parts[:len(parts)-1]
-	}
-	if len(parts) == 0 {
-		return false
-	}
-	return strings.TrimSpace(parts[len(parts)-1]) != ""
+	return []byte(b.String())
 }

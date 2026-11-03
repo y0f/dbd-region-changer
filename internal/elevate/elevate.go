@@ -23,14 +23,11 @@ type Payload struct {
 
 // applyPayload performs the remove-then-write described by p (Windows direct path and Linux helper).
 func applyPayload(p Payload) error {
-	h := hostsfile.New()
-	if err := h.RemoveAll(p.RemoveHostnames); err != nil {
-		return err
-	}
+	var entries []hostsfile.Entry
 	if p.Op == OpWrite {
-		return h.Apply(p.Entries)
+		entries = p.Entries
 	}
-	return nil
+	return hostsfile.New().Update(p.RemoveHostnames, entries)
 }
 
 // HandleHelperSubcommand runs the elevated hosts write if argv requests it (Payload from stdin); handled=false means launch the GUI.

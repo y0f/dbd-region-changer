@@ -2,37 +2,57 @@ package region
 
 import "sort"
 
-// Discover builds the region list from AWS region codes, keeping only those
-// whose GameLift beacon answers probe. Falls back to the built-in list when no
-// codes are given or nothing responds.
+// probeAttempts is how often a beacon is probed before its region counts as
+// down, so a single lost UDP datagram does not drop a live region.
+const probeAttempts = 2
+
+// Discover builds the region list from AWS region codes: every built-in region,
+// plus each other code whose GameLift beacon answers probe. Built-in regions
+// are kept without probing, so a lost probe or a leftover firewall block from
+// an earlier session can never hide them (or exclude them from the block).
+// The result is sorted by code.
 func Discover(codes []string, probe func(Server) bool) []Server {
+	known := make(map[string]bool, len(builtin))
+	for _, s := range builtin {
+		known[s.Code] = true
+	}
+	var toProbe []string
+	for _, c := range codes {
+		if !known[c] {
+			known[c] = true // also dedupes codes
+			toProbe = append(toProbe, c)
+		}
+	}
+
 	type res struct {
 		s  Server
 		ok bool
 	}
-	ch := make(chan res, len(codes))
-	for _, c := range codes {
+	ch := make(chan res, len(toProbe))
+	for _, c := range toProbe {
 		go func(c string) {
 			s := Server{Code: c, Pretty: PrettyName(c)}
-			ch <- res{s, probe(s)}
+			ok := false
+			for i := 0; i < probeAttempts && !ok; i++ {
+				ok = probe(s)
+			}
+			ch <- res{s, ok}
 		}(c)
 	}
-	var live []Server
-	for range codes {
+	out := Builtin()
+	for range toProbe {
 		if r := <-ch; r.ok {
-			live = append(live, r.s)
+			out = append(out, r.s)
 		}
 	}
-	if len(live) == 0 {
-		return Builtin()
-	}
-	sort.Slice(live, func(i, j int) bool { return live[i].Code < live[j].Code })
-	return live
+	sort.Slice(out, func(i, j int) bool { return out[i].Code < out[j].Code })
+	return out
 }
 
 var prettyNames = map[string]string{
 	"af-south-1":     "Africa (Cape Town)",
 	"ap-east-1":      "Asia Pacific (Hong Kong)",
+	"ap-east-2":      "Asia Pacific (Taipei)",
 	"ap-northeast-1": "Asia Pacific (Tokyo)",
 	"ap-northeast-2": "Asia Pacific (Seoul)",
 	"ap-northeast-3": "Asia Pacific (Osaka)",
@@ -42,6 +62,9 @@ var prettyNames = map[string]string{
 	"ap-southeast-2": "Asia Pacific (Sydney)",
 	"ap-southeast-3": "Asia Pacific (Jakarta)",
 	"ap-southeast-4": "Asia Pacific (Melbourne)",
+	"ap-southeast-5": "Asia Pacific (Malaysia)",
+	"ap-southeast-6": "Asia Pacific (New Zealand)",
+	"ap-southeast-7": "Asia Pacific (Thailand)",
 	"ca-central-1":   "Canada (Central)",
 	"ca-west-1":      "Canada West (Calgary)",
 	"eu-central-1":   "Europe (Frankfurt)",
@@ -55,6 +78,7 @@ var prettyNames = map[string]string{
 	"il-central-1":   "Israel (Tel Aviv)",
 	"me-central-1":   "Middle East (UAE)",
 	"me-south-1":     "Middle East (Bahrain)",
+	"mx-central-1":   "Mexico (Central)",
 	"sa-east-1":      "South America (Sao Paulo)",
 	"us-east-1":      "US East (N. Virginia)",
 	"us-east-2":      "US East (Ohio)",

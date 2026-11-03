@@ -24,7 +24,7 @@ func TestDNSProviders(t *testing.T) {
 	if len(DNSProviders) != 2 {
 		t.Fatalf("want 2 providers, got %d", len(DNSProviders))
 	}
-	if DNSProviders[0].Name != "cloudflare" || DNSProviders[1].Name != "quad9" {
+	if DNSProviders[0].Name != "cloudflare" || DNSProviders[1].Name != "google" {
 		t.Errorf("provider order wrong: %+v", DNSProviders)
 	}
 }

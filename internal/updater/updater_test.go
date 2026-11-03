@@ -15,7 +15,7 @@ func TestCheckStatuses(t *testing.T) {
 		{"1.3.0", "1.2.0", StatusOutdated},
 		{"1.2.0", "1.2.0", StatusLatest},
 		{"1.1.0", "1.2.0", StatusFuture},
-		{"v1.3.0", "1.2.0", StatusError},        // leading v fails the regex
+		{"v1.3.0", "1.2.0", StatusOutdated},     // leading v is accepted
 		{"1.3.0.rc1", "1.2.0", StatusOutdated},  // pre-release normalization
 		{"1.2.0", "1.2.0-rc.1", StatusOutdated}, // local rc is older than final
 		{"garbage", "1.2.0", StatusError},

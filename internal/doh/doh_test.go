@@ -22,7 +22,7 @@ func TestResolveReturnsFirstAnswer(t *testing.T) {
 		if r.Header.Get("accept") != "application/dns-json" {
 			t.Error("accept header wrong")
 		}
-		io.WriteString(w, `{"Answer":[{"data":"1.2.3.4"}]}`)
+		io.WriteString(w, `{"Answer":[{"type":1,"TTL":60,"data":"1.2.3.4"}]}`)
 	}))
 	defer srv.Close()
 
@@ -39,7 +39,7 @@ func TestFailoverToSecondProvider(t *testing.T) {
 	}))
 	defer bad.Close()
 	good := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		io.WriteString(w, `{"Answer":[{"data":"9.9.9.9"}]}`)
+		io.WriteString(w, `{"Answer":[{"type":1,"TTL":60,"data":"9.9.9.9"}]}`)
 	}))
 	defer good.Close()
 
@@ -54,7 +54,7 @@ func TestCacheHitWithinTTL(t *testing.T) {
 	var hits int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		atomic.AddInt32(&hits, 1)
-		io.WriteString(w, `{"Answer":[{"data":"5.5.5.5"}]}`)
+		io.WriteString(w, `{"Answer":[{"type":1,"TTL":60,"data":"5.5.5.5"}]}`)
 	}))
 	defer srv.Close()
 

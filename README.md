@@ -4,7 +4,6 @@
 
 <p align="center">
   <a href="https://github.com/y0f/dbd-region-changer/actions/workflows/ci.yml"><img src="https://github.com/y0f/dbd-region-changer/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://goreportcard.com/report/github.com/y0f/dbd-region-changer"><img src="https://goreportcard.com/badge/github.com/y0f/dbd-region-changer" alt="Go Report Card"></a>
   <a href="https://github.com/y0f/dbd-region-changer/blob/main/go.mod"><img src="https://img.shields.io/github/go-mod/go-version/y0f/dbd-region-changer" alt="Go version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPLv3-blue.svg" alt="License"></a>
   <a href="https://github.com/y0f/dbd-region-changer/releases/latest"><img src="https://img.shields.io/github/v/release/y0f/dbd-region-changer?include_prereleases&sort=semver" alt="Release"></a>
@@ -13,8 +12,9 @@
 ---
 
 Small desktop app that locks Dead by Daylight to the AWS region you pick. It firewall-blocks the
-ping beacons of every other region, scoped to the DBD executable, so the game can only measure and
-match into the one you chose. Windows and Linux (Proton works).
+ping beacons of every other region so the game can only measure and match into the one you chose.
+On Windows the block applies only to the DBD executable; on Linux it is system-wide. Windows and
+Linux (Proton works).
 
 > Close DBD before changing region and launch it after. Changing while it runs can flag Easy
 > Anti-Cheat.
@@ -26,7 +26,7 @@ match into the one you chose. Windows and Linux (Proton works).
 ## Download
 
 Single binary, no installer, on the [releases](https://github.com/y0f/dbd-region-changer/releases/latest)
-page. Each release ships a SHA256 checksum.
+page. Each release ships a `SHA256SUMS` file to verify the download.
 
 ## Usage
 
@@ -39,13 +39,18 @@ flowchart LR
     E -.->|back to normal| F[Set Default]
 ```
 
-- **Windows**: accept the admin prompt. The DBD path is found via Steam; otherwise use `...` → *Set DBD path*.
+- **Windows**: accept the admin prompt. The DBD exe is found in Steam, Epic Games and Xbox app
+  installs; if it isn't, use `...` → *Set DBD path (firewall)* and pick `DeadByDaylight-*-Shipping.exe`.
 - **Linux**: `pkexec` asks for your password when the firewall changes.
-- **Set Default** removes the rules and restores normal matchmaking.
-- Ping bars show latency per region. On Windows the block auto-refreshes between matches.
+- **Set Default** removes the rules and restores normal matchmaking. Closing the app keeps the
+  block (the next start shows it again), so click Set Default before you delete the app.
+- Ping bars show latency per region. The beacon addresses rotate, so on Windows the block picks up
+  new ones every minute while the app is open. On Linux that would need a password prompt each
+  time, so there the block is renewed only when you click Set Server.
 
-**Regions**: Hong Kong, Tokyo, Seoul, Mumbai, Singapore, Sydney, Canada Central, Frankfurt,
-Dublin, London, São Paulo, N. Virginia, Ohio, N. California, Oregon.
+**Regions**: found at startup. The app lists every AWS region whose GameLift beacon answers, so the
+list follows AWS. These are always listed: Hong Kong, Tokyo, Seoul, Mumbai, Singapore, Sydney,
+Canada (Central), Frankfurt, Ireland, London, Sao Paulo, N. Virginia, Ohio, N. California, Oregon.
 
 ## Troubleshooting
 
@@ -65,24 +70,29 @@ flowchart LR
 ```
 
 DBD runs on AWS GameLift. The client pings each region's beacon (`gamelift-ping.<region>.api.aws:7770`)
-and reports the latencies to matchmaking. The app resolves those beacon IPs and blocks all but your
-chosen region (Windows Firewall or iptables, scoped to the DBD exe). Nothing is intercepted and no
-game files are touched. Without a firewall backend it falls back to a hosts-file redirect.
+and reports the latencies to matchmaking. The app resolves those beacon addresses over
+DNS-over-HTTPS and blocks all but your chosen region's: with Windows Firewall rules scoped to the DBD
+exe, or with iptables rules on Linux that apply to every program on the machine. Nothing is
+intercepted and no game files are touched. On Linux without iptables it falls back to a hosts-file
+redirect.
 
 ## Building
 
-Go 1.26+ and a C toolchain (the GUI uses cgo + OpenGL).
+Go 1.25+ and a C toolchain (the GUI uses cgo + OpenGL).
 
-```bash
-# Windows (MinGW on PATH)
-export PATH="/c/msys64/mingw64/bin:$PATH" CGO_ENABLED=1
-go build -ldflags='-s -w' -trimpath -o dist/dbdregion.exe ./cmd/dbd
-
-# Linux (apt install libgl1-mesa-dev xorg-dev libxkbcommon-dev)
-CGO_ENABLED=1 go build -ldflags='-s -w' -trimpath -o dist/dbdregion ./cmd/dbd
+```powershell
+# Windows (MinGW gcc on PATH). Embeds the icon and the admin manifest the app needs
+# to write firewall rules, and builds without a console window.
+./scripts/build-windows.ps1
 ```
 
-Tests: `bash scripts/test.sh`. Linux build check from Windows (Docker): `./scripts/linux-test.ps1`.
+```bash
+# Linux (apt install gcc libgl1-mesa-dev xorg-dev libxkbcommon-dev)
+./scripts/build-linux.sh
+```
+
+Both write to `dist/`. Tests: `bash scripts/test.sh`. Linux build check from Windows (Docker):
+`./scripts/linux-test.ps1`.
 
 ## License
 

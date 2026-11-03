@@ -1,10 +1,12 @@
 package hostsfile
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func writeTemp(t *testing.T, content string) string {
@@ -70,43 +72,101 @@ func TestApplyWritesEntries(t *testing.T) {
 	}
 }
 
-func TestSaveNoTrailingNewlinePrefixesOne(t *testing.T) {
-	// no trailing newline -> Save must prefix one so entries do not concatenate.
-	p := writeTemp(t, "127.0.0.1 localhost")
-	h := &Hosts{Path: p}
-	if err := h.Save("5.5.5.5", "gamelift.us-east-1.amazonaws.com"); err != nil {
+func TestSaveLineEndings(t *testing.T) {
+	const e = "5.5.5.5 gamelift.us-east-1.amazonaws.com"
+	for _, tc := range []struct{ in, want string }{
+		{"127.0.0.1 localhost", "127.0.0.1 localhost\n" + e + "\n"},
+		{"127.0.0.1 localhost\n", "127.0.0.1 localhost\n" + e + "\n"},
+		{"127.0.0.1 localhost\n\n", "127.0.0.1 localhost\n\n" + e + "\n"},
+		{"127.0.0.1 localhost\r\n", "127.0.0.1 localhost\r\n" + e + "\r\n"},
+		{"127.0.0.1 localhost\r\n::1 localhost", "127.0.0.1 localhost\r\n::1 localhost\r\n" + e + "\r\n"},
+		{"", e + "\n"},
+	} {
+		p := writeTemp(t, tc.in)
+		if err := (&Hosts{Path: p}).Save("5.5.5.5", "gamelift.us-east-1.amazonaws.com"); err != nil {
+			t.Fatal(err)
+		}
+		if got := read(t, p); got != tc.want {
+			t.Errorf("Save on %q: got %q want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestSaveCreatesMissingFile(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "hosts")
+	if err := (&Hosts{Path: p}).Save("5.5.5.5", "a.example"); err != nil {
 		t.Fatal(err)
 	}
-	got := read(t, p)
-	if got != "127.0.0.1 localhost\n5.5.5.5 gamelift.us-east-1.amazonaws.com" {
+	if got := read(t, p); got != "5.5.5.5 a.example\n" {
 		t.Fatalf("got %q", got)
 	}
 }
 
-func TestSaveSingleTrailingNewlineStillPrefixes(t *testing.T) {
-	// Parity with HostHub.save: readlines()[-1] of "...localhost\n" is
-	// "...localhost\n", whose strip() is non-blank, so a newline IS prefixed
-	// (yielding a blank separator line). Reproduce exactly.
+func TestRemoveAllMissingFileIsNoop(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "hosts")
+	if err := (&Hosts{Path: p}).RemoveAll([]string{"a.example"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(p); !os.IsNotExist(err) {
+		t.Fatal("RemoveAll created the hosts file")
+	}
+}
+
+// RemoveAll with nothing to remove must not rewrite the hosts file.
+func TestRemoveAllNoMatchDoesNotWrite(t *testing.T) {
+	orig := "127.0.0.1 localhost\r\n::1 localhost\r\n"
+	p := writeTemp(t, orig)
+	old := time.Now().Add(-time.Hour).Truncate(time.Second)
+	if err := os.Chtimes(p, old, old); err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for i := 0; i < 60; i++ {
+		names = append(names, fmt.Sprintf("gamelift-ping.r%d.api.aws", i))
+	}
+	if err := (&Hosts{Path: p}).RemoveAll(names); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := read(t, p); got != orig {
+		t.Fatalf("content changed: %q", got)
+	}
+	if !fi.ModTime().Equal(old) {
+		t.Errorf("hosts file rewritten with no content change (mtime %v)", fi.ModTime())
+	}
+}
+
+func TestUpdateRemovesThenAppends(t *testing.T) {
+	p := writeTemp(t, "127.0.0.1 localhost\n9.9.9.9 a.example\n9.9.9.9 b.example\n")
+	h := &Hosts{Path: p}
+	if err := h.Update([]string{"a.example", "b.example"}, []Entry{{"1.2.3.4", "a.example"}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := read(t, p); got != "127.0.0.1 localhost\n1.2.3.4 a.example\n" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+// An external append after Apply must land on its own line and survive RemoveAll.
+func TestExternalAppendStaysSeparate(t *testing.T) {
 	p := writeTemp(t, "127.0.0.1 localhost\n")
 	h := &Hosts{Path: p}
-	if err := h.Save("5.5.5.5", "gamelift.us-east-1.amazonaws.com"); err != nil {
+	if err := h.Apply([]Entry{{"1.2.3.4", "gamelift-ping.us-west-2.api.aws"}}); err != nil {
 		t.Fatal(err)
 	}
-	got := read(t, p)
-	if got != "127.0.0.1 localhost\n\n5.5.5.5 gamelift.us-east-1.amazonaws.com" {
-		t.Fatalf("got %q", got)
-	}
-}
-
-func TestSaveBlankLastLineNoPrefix(t *testing.T) {
-	// File ending in "\n\n" has a genuinely blank last readline -> no prefix.
-	p := writeTemp(t, "127.0.0.1 localhost\n\n")
-	h := &Hosts{Path: p}
-	if err := h.Save("5.5.5.5", "gamelift.us-east-1.amazonaws.com"); err != nil {
+	f, err := os.OpenFile(p, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
 		t.Fatal(err)
 	}
-	got := read(t, p)
-	if got != "127.0.0.1 localhost\n\n5.5.5.5 gamelift.us-east-1.amazonaws.com" {
+	_, _ = f.WriteString("5.6.7.8 myhost\n") // like: echo '5.6.7.8 myhost' >> /etc/hosts
+	f.Close()
+	if err := h.RemoveAll([]string{"gamelift-ping.us-west-2.api.aws"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := read(t, p); got != "127.0.0.1 localhost\n5.6.7.8 myhost\n" {
 		t.Fatalf("got %q", got)
 	}
 }

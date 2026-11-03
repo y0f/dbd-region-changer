@@ -3,8 +3,10 @@ package doh
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -25,10 +27,23 @@ func DefaultProviders() []Provider {
 	return out
 }
 
-const cacheTTL = 600 * time.Second
+// maxCacheTTL caps how long an answer is cached; shorter record TTLs win, so
+// rotating records (the GameLift beacons use 10-60s) are re-resolved in time.
+const maxCacheTTL = 600 * time.Second
+
+// DNS record types as they appear in the JSON "type" field.
+const (
+	typeA    = 1
+	typeAAAA = 28
+)
+
+type cacheKey struct {
+	host  string
+	qtype int
+}
 
 type cacheEntry struct {
-	ip      string
+	ips     []string
 	expires time.Time
 }
 
@@ -38,7 +53,7 @@ type Resolver struct {
 	now       func() time.Time
 
 	mu    sync.Mutex
-	cache map[string]cacheEntry
+	cache map[cacheKey]cacheEntry
 }
 
 func New(providers []Provider) *Resolver {
@@ -46,92 +61,147 @@ func New(providers []Provider) *Resolver {
 		providers: providers,
 		client:    &http.Client{Timeout: 10 * time.Second},
 		now:       time.Now,
-		cache:     make(map[string]cacheEntry),
+		cache:     make(map[cacheKey]cacheEntry),
 	}
 }
 
-// Default resolves against the configured Cloudflare/Quad9 providers.
+// Default resolves against the configured providers (see config.DNSProviders).
 func Default() *Resolver { return New(DefaultProviders()) }
 
-type dnsResponse struct {
-	Answer []struct {
-		Data string `json:"data"`
-	} `json:"Answer"`
+// dnsAnswer is one JSON answer record. Type and TTL are optional: a record
+// without a type is accepted if its data is an address of the queried family,
+// and one without a TTL is cached for maxCacheTTL.
+type dnsAnswer struct {
+	Type int    `json:"type"`
+	TTL  *int   `json:"TTL"`
+	Data string `json:"data"`
 }
 
-// Resolve returns the first A record for hostname, trying providers in order and caching hits.
+type dnsResponse struct {
+	Answer []dnsAnswer `json:"Answer"`
+}
+
+// Resolve returns the first IPv4 address for hostname, trying providers in
+// order and caching hits for the record's TTL (capped at maxCacheTTL).
 func (r *Resolver) Resolve(hostname string) (string, error) {
-	if ip, ok := r.cached(hostname); ok {
-		return ip, nil
+	ips, err := r.lookup(hostname, typeA, true)
+	if err != nil {
+		return "", err
 	}
-	return r.ResolveFresh(hostname)
+	return ips[0], nil
 }
 
 // ResolveFresh skips the cache read (still updating it on success), so callers
 // can detect rotated records.
 func (r *Resolver) ResolveFresh(hostname string) (string, error) {
+	ips, err := r.lookup(hostname, typeA, false)
+	if err != nil {
+		return "", err
+	}
+	return ips[0], nil
+}
+
+// ResolveAll returns every IPv4 and IPv6 address of hostname (A then AAAA), so
+// dual-stack names can be blocked on both families. It fails only if neither
+// family resolves.
+func (r *Resolver) ResolveAll(hostname string) ([]string, error) {
+	v4, err4 := r.lookup(hostname, typeA, true)
+	v6, err6 := r.lookup(hostname, typeAAAA, true)
+	out := make([]string, 0, len(v4)+len(v6))
+	out = append(append(out, v4...), v6...)
+	if len(out) == 0 {
+		return nil, errors.Join(err4, err6)
+	}
+	return out, nil
+}
+
+func (r *Resolver) lookup(hostname string, qtype int, useCache bool) ([]string, error) {
+	key := cacheKey{hostname, qtype}
+	if useCache {
+		if ips, ok := r.cached(key); ok {
+			return ips, nil
+		}
+	}
 	var lastErr error
 	for _, p := range r.providers {
-		ip, err := r.query(p, hostname)
+		ips, ttl, err := r.query(p, hostname, qtype)
 		if err != nil {
 			lastErr = err
 			continue
 		}
-		r.store(hostname, ip)
-		return ip, nil
+		r.store(key, ips, ttl)
+		return ips, nil
 	}
 	if lastErr == nil {
 		lastErr = fmt.Errorf("no DoH provider returned an answer for %s", hostname)
 	}
-	return "", lastErr
+	return nil, lastErr
 }
 
-func (r *Resolver) query(p Provider, hostname string) (string, error) {
+// query returns the addresses of the requested type (skipping CNAMEs and other
+// records in the chain) and the smallest TTL among them.
+func (r *Resolver) query(p Provider, hostname string, qtype int) ([]string, time.Duration, error) {
 	req, err := http.NewRequest(http.MethodGet, p.URL, nil)
 	if err != nil {
-		return "", err
+		return nil, 0, err
+	}
+	typeName := "A"
+	if qtype == typeAAAA {
+		typeName = "AAAA"
 	}
 	q := req.URL.Query()
 	q.Set("name", hostname)
-	q.Set("type", "A")
+	q.Set("type", typeName)
 	q.Set("ct", "application/dns-json")
 	req.URL.RawQuery = q.Encode()
 	req.Header.Set("accept", "application/dns-json")
 
 	resp, err := r.client.Do(req)
 	if err != nil {
-		return "", err
+		return nil, 0, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		io.Copy(io.Discard, resp.Body)
-		return "", fmt.Errorf("%s returned status %d", p.Name, resp.StatusCode)
+		return nil, 0, fmt.Errorf("%s returned status %d", p.Name, resp.StatusCode)
 	}
 	var parsed dnsResponse
 	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
-		return "", err
+		return nil, 0, err
 	}
-	if len(parsed.Answer) == 0 {
-		return "", fmt.Errorf("%s returned no answers for %s", p.Name, hostname)
-	}
-	return parsed.Answer[0].Data, nil
-}
-
-func (r *Resolver) cached(hostname string) (string, bool) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	e, ok := r.cache[hostname]
-	if !ok || r.now().After(e.expires) {
-		if ok {
-			delete(r.cache, hostname)
+	var ips []string
+	ttl := maxCacheTTL
+	for _, a := range parsed.Answer {
+		ip := net.ParseIP(a.Data)
+		if (a.Type != qtype && a.Type != 0) || ip == nil || (qtype == typeA) != (ip.To4() != nil) {
+			continue
 		}
-		return "", false
+		ips = append(ips, ip.String())
+		if a.TTL != nil {
+			ttl = min(ttl, time.Duration(max(*a.TTL, 0))*time.Second)
+		}
 	}
-	return e.ip, true
+	if len(ips) == 0 {
+		return nil, 0, fmt.Errorf("%s returned no %s records for %s", p.Name, typeName, hostname)
+	}
+	return ips, ttl, nil
 }
 
-func (r *Resolver) store(hostname, ip string) {
+func (r *Resolver) cached(key cacheKey) ([]string, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.cache[hostname] = cacheEntry{ip: ip, expires: r.now().Add(cacheTTL)}
+	e, ok := r.cache[key]
+	if !ok || !r.now().Before(e.expires) {
+		if ok {
+			delete(r.cache, key)
+		}
+		return nil, false
+	}
+	return e.ips, true
+}
+
+func (r *Resolver) store(key cacheKey, ips []string, ttl time.Duration) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.cache[key] = cacheEntry{ips: ips, expires: r.now().Add(ttl)}
 }
