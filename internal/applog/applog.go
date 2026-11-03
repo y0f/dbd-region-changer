@@ -22,6 +22,7 @@ type Logger struct {
 	dir  string
 	path string
 	file *os.File
+	stop chan struct{}
 }
 
 // tempPrefix names the per-run log directories under os.TempDir().
@@ -30,6 +31,10 @@ const tempPrefix = "dcreg_tmp_"
 // staleAge is how long a leftover log directory (from a crash, kill or logoff)
 // is kept before New sweeps it.
 const staleAge = 72 * time.Hour
+
+// keepAliveEvery is how often a running Logger refreshes its dir's mtime, so a
+// long-idle instance's dir never looks stale to another instance's sweep.
+var keepAliveEvery = time.Hour
 
 // New opens a log file in a fresh temp dir; debug mode also mirrors to a console.
 // It also removes log dirs left behind by earlier runs that did not exit cleanly.
@@ -57,7 +62,24 @@ func New(debug bool) (*Logger, error) {
 	}
 
 	logger := slog.New(&lineHandler{w: w, mu: &sync.Mutex{}})
-	return &Logger{Logger: logger, dir: dir, path: path, file: f}, nil
+	stop := make(chan struct{})
+	go keepAlive(dir, time.NewTicker(keepAliveEvery), stop)
+	return &Logger{Logger: logger, dir: dir, path: path, file: f, stop: stop}, nil
+}
+
+// keepAlive touches dir on every tick until stop is closed. The app may log
+// nothing for days, so the log file's own mtime cannot be relied on.
+func keepAlive(dir string, t *time.Ticker, stop <-chan struct{}) {
+	defer t.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-t.C:
+			now := time.Now()
+			os.Chtimes(dir, now, now)
+		}
+	}
 }
 
 func (l *Logger) LogPath() string { return l.path }
@@ -81,6 +103,10 @@ func (l *Logger) DumpTo(dir string) error {
 // more than once.
 func (l *Logger) Close() error {
 	var err error
+	if l.stop != nil {
+		close(l.stop)
+		l.stop = nil
+	}
 	if l.file != nil {
 		err = l.file.Close()
 		l.file = nil
@@ -98,8 +124,8 @@ func (l *Logger) Close() error {
 func (l *Logger) Cleanup() { _ = l.Close() }
 
 // sweepStale removes tempPrefix dirs in root whose newest entry is older than
-// cutoff. A dir still held open by a running instance cannot be removed on
-// Windows, and is skipped elsewhere because its log keeps getting written.
+// cutoff. A running instance's dir is never older than keepAliveEvery, since
+// its Logger keeps touching it.
 func sweepStale(root string, cutoff time.Time) {
 	entries, err := os.ReadDir(root)
 	if err != nil {

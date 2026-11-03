@@ -5,6 +5,8 @@ package hostsfile
 
 import (
 	"bytes"
+	"fmt"
+	"net"
 	"os"
 	"strings"
 )
@@ -65,8 +67,15 @@ func (h *Hosts) Apply(entries []Entry) error {
 // Update removes every line whose second field is one of remove, then appends
 // entries, in a single read and at most one write. Appended lines use the
 // file's line ending (CRLF if it already has any) and end with a newline, so a
-// later append by another tool starts on its own line.
+// later append by another tool starts on its own line. An entry with an
+// invalid IP or a hostname containing whitespace or control characters is
+// rejected and nothing is written.
 func (h *Hosts) Update(remove []string, entries []Entry) error {
+	for _, e := range entries {
+		if err := e.validate(); err != nil {
+			return err
+		}
+	}
 	data, err := os.ReadFile(h.Path)
 	if err != nil && !os.IsNotExist(err) {
 		return err
@@ -80,6 +89,17 @@ func (h *Hosts) Update(remove []string, entries []Entry) error {
 		perm = fi.Mode().Perm()
 	}
 	return os.WriteFile(h.Path, out, perm)
+}
+
+// validate rejects entries that would not form exactly one "ip hostname" line.
+func (e Entry) validate() error {
+	if net.ParseIP(e.IP) == nil {
+		return fmt.Errorf("hostsfile: invalid IP %q", e.IP)
+	}
+	if e.Hostname == "" || strings.IndexFunc(e.Hostname, func(r rune) bool { return r <= ' ' || r == 0x7f }) >= 0 {
+		return fmt.Errorf("hostsfile: invalid hostname %q", e.Hostname)
+	}
+	return nil
 }
 
 func edit(data []byte, remove []string, entries []Entry) []byte {

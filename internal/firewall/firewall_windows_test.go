@@ -7,9 +7,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"golang.org/x/sys/windows"
 )
 
-// fakeNetsh puts a netsh.bat first on PATH that logs each call and exits 1 for
+// fakeNetsh points netshPath at a netsh.bat that logs each call and exits 1 for
 // "add" when failAdd is set, so no real firewall rule is touched.
 func fakeNetsh(t *testing.T, failAdd bool) (logf string) {
 	t.Helper()
@@ -23,7 +25,9 @@ func fakeNetsh(t *testing.T, failAdd bool) (logf string) {
 	if err := os.WriteFile(filepath.Join(dir, "netsh.bat"), []byte(bat), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	old := netshPath
+	netshPath = filepath.Join(dir, "netsh.bat")
+	t.Cleanup(func() { netshPath = old })
 	return logf
 }
 
@@ -31,6 +35,29 @@ func calls(t *testing.T, logf string) []string {
 	t.Helper()
 	data, _ := os.ReadFile(logf)
 	return strings.Split(strings.TrimSpace(string(data)), "\n")
+}
+
+// The elevated process must run the system netsh.exe, never one found earlier
+// on PATH.
+func TestNetshIgnoresPath(t *testing.T) {
+	sys, err := windows.GetSystemDirectory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.EqualFold(netshPath, filepath.Join(sys, "netsh.exe")) {
+		t.Fatalf("netshPath = %q, want netsh.exe in %q", netshPath, sys)
+	}
+	dir := t.TempDir()
+	logf := filepath.Join(dir, "calls.log")
+	bat := "@echo off\r\necho %* >> \"" + logf + "\"\r\nexit /b 0\r\n"
+	if err := os.WriteFile(filepath.Join(dir, "netsh.bat"), []byte(bat), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	_, _ = runNetsh("advfirewall", "show", "currentprofile", "state")
+	if _, err := os.Stat(logf); err == nil {
+		t.Fatal("runNetsh ran netsh.bat from PATH")
+	}
 }
 
 // deletesLive reports whether call deletes the live (non-pending) rule set.

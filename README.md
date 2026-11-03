@@ -26,7 +26,7 @@ Linux (Proton works).
 ## Download
 
 Single binary, no installer, on the [releases](https://github.com/y0f/dbd-region-changer/releases/latest)
-page. Each release ships a `SHA256SUMS` file to verify the download.
+page. Each release from 1.0.1 on ships a `SHA256SUMS` file to verify the download.
 
 ## Usage
 
@@ -91,8 +91,9 @@ Go 1.25+ and a C toolchain (the GUI uses cgo + OpenGL).
 ./scripts/build-linux.sh
 ```
 
-Both write to `dist/`. Tests: `bash scripts/test.sh`. Linux build check from Windows (Docker):
-`./scripts/linux-test.ps1`.
+Both write to `dist/`. Tests: `bash scripts/test.sh` runs the pure-Go `internal/` tests without a
+C toolchain but skips the GUI package `ui/`; the full suite, `ui/` included, needs gcc:
+`CGO_ENABLED=1 go test ./...`. Linux build check from Windows (Docker): `./scripts/linux-test.ps1`.
 
 ## License
 

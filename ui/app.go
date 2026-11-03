@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -95,23 +97,32 @@ func New(log *applog.Logger) *App {
 	}
 }
 
-// discoverRegions fetches the AWS region codes and keeps the regions whose
-// GameLift beacon answers, so every live region gets blocked. Falls back to
-// the built-in list.
+// discoverRegions returns the built-in regions plus every other AWS region
+// whose GameLift beacon answers, so every live region gets blocked. If
+// ip-ranges.json cannot be fetched it returns the built-in list.
 func (a *App) discoverRegions() []region.Server {
 	codes, err := awsranges.RegionCodes(nil)
 	if err != nil {
 		a.log.Warn("ip-ranges fetch failed, using built-in regions", "err", err)
 		return region.Builtin()
 	}
-	return region.Discover(codes, func(s region.Server) bool {
-		ip, rerr := a.resolver.Resolve(s.Dualstack())
-		if rerr != nil {
-			return false
-		}
-		_, ok := ping.UDPBeacon(ip)
-		return ok
-	})
+	return region.Discover(codes, a.beaconLive)
+}
+
+// beaconLive reports whether region s has a live GameLift beacon. Where the
+// block applies system-wide (Linux), a lock left by the last session also
+// drops this app's own probes, so a beacon that resolves counts as live:
+// otherwise its region would be missing from the next block.
+func (a *App) beaconLive(s region.Server) bool {
+	ip, err := a.resolver.Resolve(s.Dualstack())
+	if err != nil {
+		return false
+	}
+	if fwSupported() && !firewall.NeedsProgram() && loadApplied() != "" {
+		return true
+	}
+	_, ok := ping.UDPBeacon(ip)
+	return ok
 }
 
 func (a *App) programPath() string {
@@ -136,35 +147,45 @@ func (a *App) beaconIPs(host string) []string {
 }
 
 // blockIPs resolves the beacon addresses of every region except code, sorted
-// and deduplicated. Regions are resolved in parallel.
-func (a *App) blockIPs(code string) []string {
+// and deduplicated. Regions are resolved in parallel. The error names the
+// regions no address was found for; the addresses of the others are still
+// returned.
+func (a *App) blockIPs(code string) ([]string, error) {
 	var (
-		wg   sync.WaitGroup
-		mu   sync.Mutex
-		seen = map[string]bool{}
-		out  []string
+		wg     sync.WaitGroup
+		mu     sync.Mutex
+		seen   = map[string]bool{}
+		out    []string
+		failed []string
 	)
 	for _, r := range a.regions {
 		if r.Code == code {
 			continue
 		}
 		wg.Add(1)
-		go func(host string) {
+		go func(r region.Server) {
 			defer wg.Done()
-			ips := a.beaconIPs(host)
+			ips := a.beaconIPs(r.Dualstack())
 			mu.Lock()
 			defer mu.Unlock()
+			if len(ips) == 0 {
+				failed = append(failed, r.Code)
+			}
 			for _, ip := range ips {
 				if !seen[ip] {
 					seen[ip] = true
 					out = append(out, ip)
 				}
 			}
-		}(r.Dualstack())
+		}(r)
 	}
 	wg.Wait()
 	sort.Strings(out)
-	return out
+	if len(failed) > 0 {
+		sort.Strings(failed)
+		return out, fmt.Errorf("no beacon address found for %s", strings.Join(failed, ", "))
+	}
+	return out, nil
 }
 
 // setApplied records the firewall state and remembers it across restarts.
@@ -202,26 +223,55 @@ func (a *App) applyFirewall(code string) {
 		})
 		return
 	}
-	ips := a.blockIPs(code)
+	ips, err := a.blockIPs(code)
+	if err != nil {
+		// A block without these regions would let the game reach them while
+		// the label claims the lock, so the firewall is left as it is.
+		a.log.Error("beacon lookup failed; firewall unchanged", "err", err)
+		fyne.Do(func() {
+			dialog.NewError(fmt.Errorf("could not look up the region servers, the firewall was not changed (check your connection and try again): %w", err), a.win).Show()
+		})
+		return
+	}
+	a.replaceBlock(program, code, ips)
+}
+
+// replaceBlock swaps the firewall block for one of ips that leaves code open.
+// The caller holds fwMu.
+func (a *App) replaceBlock(program, code string, ips []string) {
 	if err := fwApply(program, ips); err != nil {
 		a.log.Error("firewall apply failed", "err", err)
 		msg := "firewall block failed (close DBD and try again)"
-		if fwSilent() {
+		switch {
+		case fwSilent():
 			// A failed apply can leave the old block, a partial new one, or
-			// none. Clear it, so the rules and the label agree. Where clearing
-			// needs a password prompt the previous state is kept instead: a
-			// dismissed prompt changed nothing.
+			// none. Clear it, so the rules and the label agree.
 			if cerr := fwClear(); cerr != nil {
 				a.log.Error("firewall clear failed", "err", cerr)
 			}
 			a.setApplied("", nil)
 			msg = "firewall block failed and the region lock was removed (close DBD and try again)"
+		case !errors.Is(err, firewall.ErrNotRun):
+			// The authorized script failed and removed its partial block.
+			a.setApplied("", nil)
+			msg = "firewall block failed and the region lock was removed (try again)"
 		}
+		// Otherwise the change never ran (pkexec missing or the password
+		// prompt dismissed): nothing changed, so the previous state is kept.
 		fyne.Do(func() { dialog.NewError(fmt.Errorf("%s: %w", msg, err), a.win).Show() })
 		return
 	}
 	a.setApplied(code, ips)
 	a.log.Info("firewall block applied", "allow", code, "blocked_beacons", len(ips))
+}
+
+// showBlock records code as locked by rules that are already in place, with
+// none of their addresses known yet. The caller holds fwMu.
+func (a *App) showBlock(code string) {
+	a.mu.Lock()
+	a.appliedCode = code
+	a.blocked = map[string]bool{}
+	a.mu.Unlock()
 }
 
 // restoreApplied picks up a block left by an earlier session. Firewall rules
@@ -240,7 +290,17 @@ func (a *App) restoreApplied() {
 	case fwSilent() && known && (!firewall.NeedsProgram() || a.programPath() != ""):
 		// Re-resolve the beacons, which have rotated since, and replace the block.
 		a.log.Info("restoring region lock from last session", "code", code)
-		a.applyFirewall(code)
+		a.fwMu.Lock()
+		defer a.fwMu.Unlock()
+		ips, err := a.blockIPs(code)
+		if err != nil {
+			// Offline at startup: keep the old rules; the refresh loop adds the
+			// current beacons once lookups work again.
+			a.log.Warn("beacon lookup failed; keeping region lock from last session", "code", code, "err", err)
+			a.showBlock(code)
+			return
+		}
+		a.replaceBlock(a.programPath(), code, ips)
 	case fwSilent():
 		// The block cannot be rebuilt (region gone or DBD path unknown): remove it.
 		a.log.Warn("removing region lock from last session", "code", code)
@@ -254,10 +314,7 @@ func (a *App) restoreApplied() {
 		// Changing rules needs a password prompt here, so only show the block.
 		a.log.Info("region lock from last session still active", "code", code)
 		a.fwMu.Lock()
-		a.mu.Lock()
-		a.appliedCode = code
-		a.blocked = map[string]bool{}
-		a.mu.Unlock()
+		a.showBlock(code)
 		a.fwMu.Unlock()
 	}
 }
@@ -284,7 +341,7 @@ func (a *App) refreshBlock() {
 	if code == "" {
 		return
 	}
-	ips := a.blockIPs(code)
+	ips, _ := a.blockIPs(code) // adding only: regions that failed to resolve keep their rules
 
 	a.fwMu.Lock()
 	defer a.fwMu.Unlock()
@@ -330,11 +387,9 @@ func (a *App) Run() {
 // start finds DBD and the live regions (network bound, seconds), restores a
 // block from the last session, then enables the controls and starts the loops.
 func (a *App) start() {
-	path := dbdpath.Find()
+	found := dbdpath.Find()
 	regions := a.discoverRegions()
-	a.mu.Lock()
-	a.dbdPath = path
-	a.mu.Unlock()
+	path := a.useFoundPath(found)
 	a.log.Info("regions loaded", "count", len(regions), "dbd", path)
 
 	fyne.DoAndWait(func() { a.setRegions(regions) })
@@ -346,6 +401,17 @@ func (a *App) start() {
 	go a.pingLoop()
 	go a.selectedPingLoop()
 	go a.firewallRefreshLoop()
+}
+
+// useFoundPath adopts the autodetected DBD path unless the user set one while
+// the regions were loading, and returns the path in effect.
+func (a *App) useFoundPath(found string) string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.dbdPath == "" {
+		a.dbdPath = found
+	}
+	return a.dbdPath
 }
 
 // setRegions fills the region list. It runs on the UI goroutine.
@@ -536,15 +602,30 @@ func (a *App) onSetDBDPath() {
 		}
 		defer rc.Close()
 		path := rc.URI().Path()
-		a.mu.Lock()
-		a.dbdPath = path
-		a.mu.Unlock()
-		if serr := dbdpath.Save(path); serr != nil {
-			a.log.Warn("saving dbd path failed", "err", serr)
+		if serr := a.setDBDPath(path); serr != nil {
+			a.log.Warn("dbd path rejected", "path", path, "err", serr)
+			dialog.NewError(serr, a.win).Show()
+			return
 		}
 		a.log.Info("dbd path set", "path", path)
 		dialog.NewInformation("DBD path set", path, a.win).Show()
 	}, a.win)
+}
+
+// setDBDPath uses and remembers path if it names a DBD shipping binary.
+// Firewall rules scoped to any other exe (such as the DeadByDaylight.exe
+// launcher stub) would miss the game's traffic.
+func (a *App) setDBDPath(path string) error {
+	if !dbdpath.IsGameExe(path) {
+		return fmt.Errorf("%s is not the Dead by Daylight game binary: pick DeadByDaylight-Win64-Shipping.exe (Steam), DeadByDaylight-EGS-Shipping.exe (Epic) or DeadByDaylight-WinGDK-Shipping.exe (Xbox / Game Pass)", filepath.Base(path))
+	}
+	a.mu.Lock()
+	a.dbdPath = path
+	a.mu.Unlock()
+	if err := dbdpath.Save(path); err != nil {
+		a.log.Warn("saving dbd path failed", "err", err)
+	}
+	return nil
 }
 
 func (a *App) onCloseRequested() {
@@ -570,9 +651,15 @@ func (a *App) onCloseRequested() {
 func (a *App) onCheckUpdates() {
 	go func() {
 		res := updater.Check(nil)
-		a.log.Info("update check", "code", res.Code, "local", res.Local, "remote", res.Remote)
-		fyne.Do(func() { a.showUpdateResult(res) })
+		fyne.Do(func() { a.reportUpdate(res) })
 	}()
+}
+
+// reportUpdate logs the update check result, with the reason if it failed,
+// and shows it.
+func (a *App) reportUpdate(res updater.Result) {
+	a.log.Info("update check", "code", res.Code, "local", res.Local, "remote", res.Remote, "err", res.Err)
+	a.showUpdateResult(res)
 }
 
 func (a *App) onDumpLogs() {

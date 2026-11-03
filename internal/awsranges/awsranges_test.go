@@ -3,6 +3,7 @@ package awsranges
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"reflect"
 	"sync/atomic"
@@ -96,5 +97,64 @@ func TestRegionCodesConditionalFetchAndCache(t *testing.T) {
 	fail.Store(true)
 	if got, err := RegionCodes(srv.Client()); err != nil || !reflect.DeepEqual(got, want) {
 		t.Fatalf("fallback to cache: got %v, %v", got, err)
+	}
+}
+
+// Codes become gamelift hostnames written to the hosts file by an elevated
+// process, so anything that is not a plain region code is dropped.
+func TestRegionCodesDropsMalformedCodes(t *testing.T) {
+	body := `{"prefixes":[
+		{"region":"us-east-1"},
+		{"region":"us-east-1 evil.example"},
+		{"region":"eu-west-1\n1.2.3.4"},
+		{"region":"../x-1"},
+		{"region":"ap-southeast-2"}
+	]}`
+	srv := serve(t, func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte(body)) })
+	got, err := RegionCodes(srv.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"ap-southeast-2", "us-east-1"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %q want %q", got, want)
+	}
+}
+
+// The cache lives in a user-writable dir; a tampered file must be ignored,
+// neither revalidated with a 304 nor used as the offline fallback.
+func TestRegionCodesIgnoresTamperedCache(t *testing.T) {
+	var fail atomic.Bool
+	srv := serve(t, func(w http.ResponseWriter, r *http.Request) {
+		if fail.Load() {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		if r.Header.Get("If-None-Match") != "" {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		w.Write([]byte(`{"prefixes":[{"region":"us-east-1"}]}`))
+	})
+	tampered := []byte(`{"etag":"\"abc\"","codes":["us-east-1","eu-west-1\n6.6.6.6 evil"]}`)
+	path := cachePath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	fail.Store(true)
+	if err := os.WriteFile(path, tampered, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := RegionCodes(srv.Client()); err == nil {
+		t.Fatalf("fallback used tampered cache: %q", got)
+	}
+
+	fail.Store(false)
+	got, err := RegionCodes(srv.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"us-east-1"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %q want %q", got, want)
 	}
 }

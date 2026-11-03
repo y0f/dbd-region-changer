@@ -32,17 +32,27 @@ func Find() string {
 	return ""
 }
 
+// Where installDirs looks; vars so tests can point them at a temp tree.
+var (
+	steamLibs    = steamLibraries
+	epicManifest = `C:\ProgramData\Epic\UnrealEngineLauncher\LauncherInstalled.dat`
+	epicDefault  = `C:\Program Files\Epic Games\DeadByDaylight`
+	xboxDirs     = []string{
+		`C:\XboxGames\Dead by Daylight`,
+		`D:\XboxGames\Dead by Daylight`,
+		`E:\XboxGames\Dead by Daylight`,
+	}
+)
+
 // installDirs lists candidate DBD install folders across storefronts.
 func installDirs() []string {
 	var dirs []string
-	for _, lib := range steamLibraries() {
+	for _, lib := range steamLibs() {
 		dirs = append(dirs, filepath.Join(lib, "steamapps", "common", "Dead by Daylight"))
 	}
-	dirs = append(dirs, epicInstalls(`C:\ProgramData\Epic\UnrealEngineLauncher\LauncherInstalled.dat`)...)
-	dirs = append(dirs, `C:\Program Files\Epic Games\DeadByDaylight`)
-	for _, drive := range []string{"C", "D", "E"} {
-		dirs = append(dirs, drive+`:\XboxGames\Dead by Daylight`)
-	}
+	dirs = append(dirs, epicInstalls(epicManifest)...)
+	dirs = append(dirs, epicDefault)
+	dirs = append(dirs, xboxDirs...)
 	return dedup(dirs)
 }
 

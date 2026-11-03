@@ -3,6 +3,7 @@
 package firewall
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -58,14 +59,14 @@ func TestApplyScriptBlocksIPv6WithIP6tables(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		"iptables -A DBD_REGION -d 192.0.2.1 -j DROP", "iptables -I OUTPUT -j DBD_REGION",
-		"ip6tables -A DBD_REGION -d 2001:db8::1 -j DROP", "ip6tables -I OUTPUT -j DBD_REGION",
+		"iptables -w -A DBD_REGION -d 192.0.2.1 -j DROP", "iptables -w -I OUTPUT -j DBD_REGION",
+		"ip6tables -w -A DBD_REGION -d 2001:db8::1 -j DROP", "ip6tables -w -I OUTPUT -j DBD_REGION",
 	} {
 		if !strings.Contains(log, want) {
 			t.Errorf("missing %q in:\n%s", want, log)
 		}
 	}
-	if strings.Contains(log, "not-an-ip") || strings.Contains(log, "iptables -A DBD_REGION -d 2001") {
+	if strings.Contains(log, "not-an-ip") || strings.Contains(log, "iptables -w -A DBD_REGION -d 2001") {
 		t.Errorf("address routed to the wrong tool or invalid entry passed through:\n%s", log)
 	}
 }
@@ -73,5 +74,93 @@ func TestApplyScriptBlocksIPv6WithIP6tables(t *testing.T) {
 func TestClearScriptToleratesMissingChains(t *testing.T) {
 	if _, err := runScript(t, clearScript(), "DBD_REGION"); err != nil {
 		t.Fatalf("clear failed on missing chains: %v", err)
+	}
+}
+
+// A rule command failing after the old chain was flushed must not leave half
+// a block behind.
+func TestApplyScriptRemovesPartialBlockOnFailure(t *testing.T) {
+	// The flush failing too must not stop the rest of the cleanup.
+	log, err := runScript(t, applyScript([]string{"192.0.2.1", "192.0.2.2"}),
+		"-C OUTPUT", "-A DBD_REGION -d 192.0.2.2 ", "-F DBD_REGION")
+	var ee *exec.ExitError
+	if !errors.As(err, &ee) || ee.ExitCode() != 1 {
+		t.Fatalf("err = %v, want exit status 1", err)
+	}
+	_, after, _ := strings.Cut(log, "-A DBD_REGION -d 192.0.2.2 ")
+	for _, want := range []string{"iptables -w -F DBD_REGION", "iptables -w -D OUTPUT -j DBD_REGION", "iptables -w -X DBD_REGION"} {
+		if !strings.Contains(after, want) {
+			t.Errorf("missing %q after the failed rule in:\n%s", want, log)
+		}
+	}
+}
+
+// Every iptables call waits for the xtables lock instead of failing on it.
+func TestScriptsWaitForXtablesLock(t *testing.T) {
+	log, err := runScript(t, applyScript([]string{"192.0.2.1", "2001:db8::1"}), "-C OUTPUT")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(log), "\n") {
+		if !strings.Contains(line, " -w ") {
+			t.Errorf("call without -w: %q", line)
+		}
+	}
+}
+
+// A failing script must not exit 126/127, which mean a refused prompt.
+func TestFailedScriptExitsOne(t *testing.T) {
+	err := exec.Command("sh", "-c", onFailure("")+"set -e; dbd-region-changer-no-such-command").Run()
+	var ee *exec.ExitError
+	if !errors.As(err, &ee) || ee.ExitCode() != 1 {
+		t.Fatalf("err = %v, want exit status 1", err)
+	}
+}
+
+// fakePkexec replaces pkexec with a shell script body for one test.
+func fakePkexec(t *testing.T, body string) {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "pkexec")
+	if err := os.WriteFile(p, []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	old := pkexec
+	pkexec = p
+	t.Cleanup(func() { pkexec = old })
+}
+
+func TestPkexecScriptReportsRefusedPrompt(t *testing.T) {
+	for _, code := range []string{"126", "127"} {
+		fakePkexec(t, "exit "+code)
+		if err := pkexecScript("true"); !errors.Is(err, ErrNotAuthorized) {
+			t.Errorf("pkexec exit %s: err = %v, want ErrNotAuthorized", code, err)
+		}
+	}
+}
+
+// pkexec that cannot start never ran the script: nothing changed.
+func TestPkexecScriptReportsStartFailureAsNotRun(t *testing.T) {
+	old := pkexec
+	pkexec = filepath.Join(t.TempDir(), "no-such-pkexec")
+	t.Cleanup(func() { pkexec = old })
+	err := pkexecScript("true")
+	if !errors.Is(err, ErrNotRun) || errors.Is(err, ErrNotAuthorized) {
+		t.Fatalf("err = %v, want ErrNotRun only", err)
+	}
+}
+
+// A refused prompt also never ran the script.
+func TestNotAuthorizedIsNotRun(t *testing.T) {
+	fakePkexec(t, "exit 126")
+	if err := pkexecScript("true"); !errors.Is(err, ErrNotRun) {
+		t.Fatalf("err = %v, want ErrNotRun", err)
+	}
+}
+
+func TestPkexecScriptReportsScriptFailure(t *testing.T) {
+	fakePkexec(t, `exec "$@"`)
+	err := pkexecScript(onFailure("") + "set -e; dbd-region-changer-no-such-command")
+	if err == nil || errors.Is(err, ErrNotRun) {
+		t.Fatalf("err = %v, want a failure other than ErrNotRun", err)
 	}
 }

@@ -27,7 +27,7 @@ func TestNormalizeTagForms(t *testing.T) {
 			t.Errorf("normalizeTag(%q) = %q, %v; want %q", tag, got, err, want)
 		}
 	}
-	for _, bad := range []string{"", "1", "garbage", "1.2.3.4", "1.2.0rc1x"} {
+	for _, bad := range []string{"", "1", "garbage", "1.2.3.4", "1.2.0rc1x", "1.2.99999999999999999999", "1.2.0rc1234567890"} {
 		if got, err := normalizeTag(bad); err == nil {
 			t.Errorf("normalizeTag(%q) = %q, want error", bad, got)
 		}

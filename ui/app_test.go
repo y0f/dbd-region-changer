@@ -1,14 +1,17 @@
 package ui
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -22,9 +25,11 @@ import (
 	"github.com/y0f/dbd-region-changer/internal/applog"
 	"github.com/y0f/dbd-region-changer/internal/doh"
 	"github.com/y0f/dbd-region-changer/internal/elevate"
+	"github.com/y0f/dbd-region-changer/internal/firewall"
 	"github.com/y0f/dbd-region-changer/internal/hostsfile"
 	"github.com/y0f/dbd-region-changer/internal/ping"
 	"github.com/y0f/dbd-region-changer/internal/region"
+	"github.com/y0f/dbd-region-changer/internal/updater"
 )
 
 // stubDoH serves DoH JSON answers from answer (nil means HTTP 500). Every
@@ -142,16 +147,16 @@ func TestBlockIPsCollectsRotatingBeaconPool(t *testing.T) {
 		return []string{pool[int(n.Add(1)-1)%len(pool)]}
 	})
 	a := newTestApp(t, []region.Server{{Code: "eu-west-1"}, {Code: "us-east-1"}}, res, "")
-	if got := a.blockIPs("eu-west-1"); !slices.Equal(got, pool) {
-		t.Fatalf("blockIPs = %v, want the whole pool %v", got, pool)
+	if got, err := a.blockIPs("eu-west-1"); err != nil || !slices.Equal(got, pool) {
+		t.Fatalf("blockIPs = %v, %v, want the whole pool %v", got, err, pool)
 	}
 }
 
 func TestBlockIPsKeepsEveryRecordOfAnAnswer(t *testing.T) {
 	res := stubDoH(t, func(string) []string { return []string{"10.0.0.2", "10.0.0.1"} })
 	a := newTestApp(t, []region.Server{{Code: "eu-west-1"}, {Code: "us-east-1"}}, res, "")
-	if got := a.blockIPs("eu-west-1"); !slices.Equal(got, []string{"10.0.0.1", "10.0.0.2"}) {
-		t.Fatalf("blockIPs = %v", got)
+	if got, err := a.blockIPs("eu-west-1"); err != nil || !slices.Equal(got, []string{"10.0.0.1", "10.0.0.2"}) {
+		t.Fatalf("blockIPs = %v, %v", got, err)
 	}
 }
 
@@ -341,7 +346,7 @@ func TestFailedApplyLeavesNoStaleRegion(t *testing.T) {
 // prompt) changed nothing, so the previous state stays.
 func TestFailedApplyKeepsStateOnPromptingBackend(t *testing.T) {
 	fs := newFakeSystem(t, false)
-	fs.applyErr = errors.New("pkexec dismissed")
+	fs.applyErr = fmt.Errorf("pkexec iptables: %w", firewall.ErrNotAuthorized)
 	res := stubDoH(t, func(string) []string { return []string{"10.0.0.1"} })
 	a := newTestApp(t, []region.Server{{Code: "eu-west-1"}, {Code: "us-east-1"}}, res, "")
 	a.appliedCode, a.blocked = "eu-west-1", map[string]bool{"10.0.0.2": true}
@@ -352,6 +357,29 @@ func TestFailedApplyKeepsStateOnPromptingBackend(t *testing.T) {
 	}
 	if code, _ := a.state(); code != "eu-west-1" {
 		t.Fatalf("appliedCode = %q", code)
+	}
+}
+
+// pkexec that cannot start never ran the script, so the lock stays as it was.
+func TestApplyThatNeverRanKeepsState(t *testing.T) {
+	fs := newFakeSystem(t, false)
+	fs.applyErr = fmt.Errorf("pkexec iptables: %w: exec: \"pkexec\": executable file not found in $PATH", firewall.ErrNotRun)
+	res := stubDoH(t, func(string) []string { return []string{"10.0.0.1"} })
+	a := newTestApp(t, []region.Server{{Code: "eu-west-1"}, {Code: "us-east-1"}}, res, "")
+	a.appliedCode, a.blocked = "eu-west-1", map[string]bool{"10.0.0.2": true}
+	if err := saveApplied("eu-west-1"); err != nil {
+		t.Fatal(err)
+	}
+
+	a.applyFirewall("us-east-1")
+	if fs.clears != 0 {
+		t.Fatal("must not try to clear")
+	}
+	if code, _ := a.state(); code != "eu-west-1" {
+		t.Fatalf("appliedCode = %q", code)
+	}
+	if got := loadApplied(); got != "eu-west-1" {
+		t.Fatalf("persisted state = %q, want eu-west-1", got)
 	}
 }
 
@@ -425,6 +453,161 @@ func TestHostsFallbackReportsLookupFailure(t *testing.T) {
 	text := overlayText(a.win.Canvas())
 	if strings.Contains(text, permMessage) || !strings.Contains(text, "look up") {
 		t.Fatalf("dialog text = %q", text)
+	}
+}
+
+// On Linux, Set Default without a hosts redirect must not cause a second
+// password prompt for the hosts file.
+func TestClearFirewallSkipsHostsWhenNoRedirect(t *testing.T) {
+	fs := newFakeSystem(t, false)
+	a := newTestApp(t, []region.Server{{Code: "eu-west-1"}}, stubDoH(t, func(string) []string { return nil }),
+		"127.0.0.1 localhost\n")
+	a.appliedCode = "eu-west-1"
+	if err := a.clearFirewall(); err != nil {
+		t.Fatal(err)
+	}
+	wantHosts := 0
+	if runtime.GOOS == "windows" {
+		wantHosts = 1
+	}
+	if fs.clears != 1 || fs.hostsOps != wantHosts {
+		t.Fatalf("clears = %d, hosts writes = %d, want 1 and %d", fs.clears, fs.hostsOps, wantHosts)
+	}
+}
+
+// A region whose beacon cannot be resolved would be left open while the label
+// claims the lock, so the firewall must stay as it was.
+func TestApplyKeepsStateWhenABeaconLookupFails(t *testing.T) {
+	for name, answer := range map[string]func(string) []string{
+		"all lookups fail": func(string) []string { return nil },
+		"one region fails": func(name string) []string {
+			if name == "gamelift-ping.ap-east-1.api.aws" {
+				return nil
+			}
+			return []string{"10.0.0.1"}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fs := newFakeSystem(t, true)
+			regions := []region.Server{{Code: "eu-west-1"}, {Code: "us-east-1"}, {Code: "ap-east-1"}}
+			a := newTestApp(t, regions, stubDoH(t, answer), "")
+			a.appliedCode, a.blocked = "eu-west-1", map[string]bool{"10.0.0.2": true}
+
+			a.applyFirewall("us-east-1")
+			if len(fs.applied)+fs.clears != 0 {
+				t.Fatalf("firewall changed: applied %v, clears %d", fs.applied, fs.clears)
+			}
+			if code, _ := a.state(); code != "eu-west-1" {
+				t.Fatalf("appliedCode = %q", code)
+			}
+		})
+	}
+}
+
+// Offline at startup, the restore must keep last session's rules (not replace
+// them with an empty block) and still show the lock.
+func TestRestoreAppliedKeepsBlockWhenOffline(t *testing.T) {
+	fs := newFakeSystem(t, true)
+	if err := saveApplied("eu-west-1"); err != nil {
+		t.Fatal(err)
+	}
+	a := newTestApp(t, []region.Server{{Code: "eu-west-1"}, {Code: "us-east-1"}}, stubDoH(t, func(string) []string { return nil }), "")
+	a.restoreApplied()
+	if len(fs.applied)+fs.clears != 0 {
+		t.Fatalf("firewall changed: applied %v, clears %d", fs.applied, fs.clears)
+	}
+	if code, _ := a.state(); code != "eu-west-1" {
+		t.Fatalf("appliedCode = %q", code)
+	}
+	if got := loadApplied(); got != "eu-west-1" {
+		t.Fatalf("saved state = %q", got)
+	}
+}
+
+// An authorized apply that failed part way removed its partial block, so the
+// old region must not be shown or remembered, and no second prompt is needed.
+func TestFailedScriptOnPromptingBackendForgetsRegion(t *testing.T) {
+	fs := newFakeSystem(t, false)
+	fs.applyErr = errors.New("pkexec iptables failed: exit status 1")
+	if err := saveApplied("eu-west-1"); err != nil {
+		t.Fatal(err)
+	}
+	res := stubDoH(t, func(string) []string { return []string{"10.0.0.1"} })
+	a := newTestApp(t, []region.Server{{Code: "eu-west-1"}, {Code: "us-east-1"}}, res, "")
+	a.appliedCode, a.blocked = "eu-west-1", map[string]bool{"10.0.0.2": true}
+
+	a.applyFirewall("us-east-1")
+	if fs.clears != 0 {
+		t.Fatal("must not prompt again to clear")
+	}
+	if code, _ := a.state(); code != "" {
+		t.Fatalf("appliedCode = %q", code)
+	}
+	if got := loadApplied(); got != "" {
+		t.Fatalf("saved state = %q", got)
+	}
+}
+
+// A path the user picked while the regions were loading must survive startup.
+func TestFoundPathKeepsUserChoice(t *testing.T) {
+	a := newTestApp(t, nil, stubDoH(t, func(string) []string { return nil }), "")
+	a.dbdPath = ""
+	if got := a.useFoundPath("found.exe"); got != "found.exe" {
+		t.Fatalf("empty path: got %q", got)
+	}
+	a.dbdPath = "picked.exe"
+	if got := a.useFoundPath(""); got != "picked.exe" || a.programPath() != "picked.exe" {
+		t.Fatalf("user path overwritten: got %q, dbdPath %q", got, a.programPath())
+	}
+}
+
+// Rules scoped to the launcher stub miss the game's traffic.
+func TestSetDBDPathRejectsNonShippingExe(t *testing.T) {
+	a := newTestApp(t, nil, stubDoH(t, func(string) []string { return nil }), "")
+	before := a.programPath()
+	launcher := filepath.Join(t.TempDir(), "DeadByDaylight.exe")
+	if err := os.WriteFile(launcher, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err := a.setDBDPath(launcher)
+	if err == nil || !strings.Contains(err.Error(), "DeadByDaylight-Win64-Shipping.exe") {
+		t.Fatalf("err = %v", err)
+	}
+	if got := a.programPath(); got != before {
+		t.Fatalf("dbdPath = %q, want %q kept", got, before)
+	}
+}
+
+// The reason an update check failed must reach the user and the log.
+func TestUpdateFailureReasonShownAndLogged(t *testing.T) {
+	a := newTestApp(t, nil, stubDoH(t, func(string) []string { return nil }), "")
+	var logged bytes.Buffer
+	a.log = &applog.Logger{Logger: slog.New(slog.NewTextHandler(&logged, nil))}
+	a.reportUpdate(updater.Result{Local: "1.0.1", Remote: "unknown", Code: updater.StatusError,
+		Err: errors.New("GitHub API returned 403 rate limit exceeded")})
+	if text := overlayText(a.win.Canvas()); !strings.Contains(text, "403 rate limit exceeded") {
+		t.Fatalf("dialog text = %q", text)
+	}
+	if !strings.Contains(logged.String(), "403 rate limit exceeded") {
+		t.Fatalf("log = %q", logged.String())
+	}
+}
+
+// With a system-wide block from the last session, the app's own probes to
+// blocked beacons are dropped; those regions must still be discovered, or the
+// next block would leave them open.
+func TestBeaconLiveTrustsLookupWhileSystemWideLockActive(t *testing.T) {
+	if firewall.NeedsProgram() {
+		t.Skip("rules are scoped to the game exe here; the app's own probes are not blocked")
+	}
+	newFakeSystem(t, false)
+	if err := saveApplied("eu-west-1"); err != nil {
+		t.Fatal(err)
+	}
+	// 192.0.2.1 (TEST-NET-1) never answers a probe.
+	a := newTestApp(t, nil, stubDoH(t, func(string) []string { return []string{"192.0.2.1"} }), "")
+	if !a.beaconLive(region.Server{Code: "eu-north-1"}) {
+		t.Fatal("region with a resolving beacon dropped while the lock is active")
 	}
 }
 

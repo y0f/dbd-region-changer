@@ -33,7 +33,8 @@ type Result struct {
 
 // tagRe matches an optional "v", MAJOR.MINOR[.PATCH], and an optional PEP-440
 // stage with or without a separator: 1.2.0, v1.2.0, 1.2rc4, 1.2.0.rc1, 1.2.0-b2, 1.2.dev0.
-var tagRe = regexp.MustCompile(`^v?(\d+)\.(\d+)(?:\.(\d+))?(?:[.-]?(dev|a|b|rc)(\d+)?)?$`)
+// Numbers are capped at 9 digits, the bound version.Parse uses to fit an int.
+var tagRe = regexp.MustCompile(`^v?(\d{1,9})\.(\d{1,9})(?:\.(\d{1,9}))?(?:[.-]?(dev|a|b|rc)(\d{1,9})?)?$`)
 
 func normalizeTag(tag string) (string, error) {
 	m := tagRe.FindStringSubmatch(tag)

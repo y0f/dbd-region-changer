@@ -3,6 +3,7 @@
 package dbdpath
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"slices"
@@ -40,12 +41,64 @@ func TestFindPrefersSavedPath(t *testing.T) {
 	}
 }
 
-func TestInstallDirsCoverEpicAndXbox(t *testing.T) {
-	dirs := installDirs()
-	for _, want := range []string{`C:\Program Files\Epic Games\DeadByDaylight`, `C:\XboxGames\Dead by Daylight`} {
-		if !slices.Contains(dirs, want) {
-			t.Errorf("installDirs() missing %q: %v", want, dirs)
-		}
+// useTempInstallDirs points every storefront location Find searches into a
+// fresh temp dir and returns it, so a real install cannot leak into the test.
+func useTempInstallDirs(t *testing.T) string {
+	useTempConfigDir(t)
+	root := t.TempDir()
+	oldSteam, oldManifest, oldEpic, oldXbox := steamLibs, epicManifest, epicDefault, xboxDirs
+	t.Cleanup(func() { steamLibs, epicManifest, epicDefault, xboxDirs = oldSteam, oldManifest, oldEpic, oldXbox })
+	steamLibs = func() []string { return []string{filepath.Join(root, "Steam")} }
+	epicManifest = filepath.Join(root, "LauncherInstalled.dat")
+	epicDefault = filepath.Join(root, "Epic Games", "DeadByDaylight")
+	xboxDirs = []string{filepath.Join(root, "D", "XboxGames", "Dead by Daylight")}
+	return root
+}
+
+func writeExe(t *testing.T, path string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestFindLocatesStorefrontInstalls(t *testing.T) {
+	for name, rel := range map[string][]string{
+		"steam":        {"Steam", "steamapps", "common", "Dead by Daylight", "DeadByDaylight", "Binaries", "Win64", "DeadByDaylight-Win64-Shipping.exe"},
+		"epic default": {"Epic Games", "DeadByDaylight", "DeadByDaylight", "Binaries", "Win64", "DeadByDaylight-EGS-Shipping.exe"},
+		"xbox":         {"D", "XboxGames", "Dead by Daylight", "Content", "DeadByDaylight", "Binaries", "WinGDK", "DeadByDaylight-WinGDK-Shipping.exe"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := useTempInstallDirs(t)
+			if got := Find(); got != "" {
+				t.Fatalf("Find() with nothing installed = %q", got)
+			}
+			want := filepath.Join(append([]string{root}, rel...)...)
+			writeExe(t, want)
+			if got := Find(); got != want {
+				t.Errorf("Find() = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestFindLocatesEpicManifestInstall(t *testing.T) {
+	root := useTempInstallDirs(t)
+	dir := filepath.Join(root, "Games", "Dead by Daylight")
+	data, err := json.Marshal(map[string]any{"InstallationList": []map[string]string{{"InstallLocation": dir}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(epicManifest, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(dir, "DeadByDaylight", "Binaries", "Win64", "DeadByDaylight-EGS-Shipping.exe")
+	writeExe(t, want)
+	if got := Find(); got != want {
+		t.Errorf("Find() = %q, want %q", got, want)
 	}
 }
 

@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -33,6 +34,11 @@ var cachePath = func() string {
 // (China, GovCloud, European Sovereign Cloud). Game clients cannot reach
 // GameLift there, so probing them only costs failed lookups.
 var otherPartitions = []string{"cn-", "us-gov-", "us-iso", "eusc-"}
+
+// validCode matches an AWS region code such as "us-east-1" or "ap-southeast-2".
+// Codes end up in hostnames written to the hosts file by an elevated process,
+// so anything else (from the network or the user-writable cache) is rejected.
+var validCode = regexp.MustCompile(`^[a-z]{2,}(-[a-z]+)+-[0-9]+$`)
 
 type rawRanges struct {
 	Prefixes []struct {
@@ -109,7 +115,7 @@ func fetch(client *http.Client, prev *cached) ([]string, *cached, error) {
 	seen := map[string]bool{}
 	var codes []string
 	for _, p := range raw.Prefixes {
-		if p.Region == "" || p.Region == "GLOBAL" || seen[p.Region] || otherPartition(p.Region) {
+		if !validCode.MatchString(p.Region) || seen[p.Region] || otherPartition(p.Region) {
 			continue
 		}
 		seen[p.Region] = true
@@ -146,6 +152,11 @@ func readCache(path string) *cached {
 	var c cached
 	if json.Unmarshal(data, &c) != nil {
 		return nil
+	}
+	for _, code := range c.Codes {
+		if !validCode.MatchString(code) || otherPartition(code) {
+			return nil // tampered or corrupt: refetch in full
+		}
 	}
 	return &c
 }

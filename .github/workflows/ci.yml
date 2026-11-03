@@ -52,6 +52,10 @@ jobs:
         env:
           CGO_ENABLED: "0"
         run: go test ./internal/...
+      - name: Test GUI logic (CGO)
+        env:
+          CGO_ENABLED: "1"
+        run: go test ./ui/...
       - name: Build all packages (incl. GUI, CGO)
         env:
           CGO_ENABLED: "1"

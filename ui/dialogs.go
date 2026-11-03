@@ -30,8 +30,11 @@ func (a *App) showUpdateResult(r updater.Result) {
 	case updater.StatusFuture:
 		a.updateAvailableDialog("Future Version", "You are using an Unreleased Version", r)
 	case updater.StatusError:
-		dialog.NewInformation("Cannot check for updates",
-			versionBody("An error occurred while checking for updates", r), a.win).Show()
+		msg := "An error occurred while checking for updates"
+		if r.Err != nil {
+			msg = fmt.Sprintf("%s: %v", msg, r.Err)
+		}
+		dialog.NewInformation("Cannot check for updates", versionBody(msg, r), a.win).Show()
 	default:
 		dialog.NewInformation("No Update Found",
 			versionBody("This is the latest version.", r), a.win).Show()

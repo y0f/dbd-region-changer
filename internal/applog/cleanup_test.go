@@ -60,6 +60,34 @@ func TestSweepStaleRemovesOnlyOldLogDirs(t *testing.T) {
 	}
 }
 
+// A running instance that logs nothing for longer than staleAge must not have
+// its dir swept by a second launch.
+func TestSweepStaleKeepsIdleRunningLogger(t *testing.T) {
+	defer func(d time.Duration) { keepAliveEvery = d }(keepAliveEvery)
+	keepAliveEvery = 10 * time.Millisecond
+	l, err := New(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(l.Cleanup)
+	dir := filepath.Dir(l.LogPath())
+	old := time.Now().Add(-2 * staleAge)
+	os.Chtimes(l.LogPath(), old, old)
+	os.Chtimes(dir, old, old)
+
+	cutoff := time.Now().Add(-staleAge)
+	for deadline := time.Now().Add(2 * time.Second); newestModTime(dir).Before(cutoff); {
+		if time.Now().After(deadline) {
+			t.Fatalf("idle logger dir %s was never touched", dir)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	sweepStale(filepath.Dir(dir), cutoff)
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("running logger dir was swept: %v", err)
+	}
+}
+
 func TestWithAttrsAndGroupsAreLogged(t *testing.T) {
 	l, err := New(false)
 	if err != nil {

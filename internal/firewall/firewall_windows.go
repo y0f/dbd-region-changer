@@ -5,9 +5,12 @@ package firewall
 import (
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/windows"
 )
 
 // Supported reports that firewall blocking is available.
@@ -98,8 +101,19 @@ func addWithRetry(args []string) error {
 	return lastErr
 }
 
+// netshPath is netsh.exe in the system directory. It is not looked up on PATH:
+// this process runs elevated, so a user-writable PATH entry must not be able to
+// supply the binary. Tests point it at a fake.
+var netshPath = func() string {
+	dir, err := windows.GetSystemDirectory()
+	if err != nil {
+		dir = `C:\Windows\System32`
+	}
+	return filepath.Join(dir, "netsh.exe")
+}()
+
 func runNetsh(args ...string) (string, error) {
-	cmd := exec.Command("netsh", args...)
+	cmd := exec.Command(netshPath, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	out, err := cmd.CombinedOutput()
 	if err != nil {

@@ -184,3 +184,28 @@ func TestListFiltersByCallback(t *testing.T) {
 		t.Fatalf("List=%v", got)
 	}
 }
+
+// The hosts file is written by an elevated process, so an entry must never be
+// able to inject a second line or a malformed one; nothing is written then.
+func TestUpdateRejectsMalformedEntries(t *testing.T) {
+	for _, e := range []Entry{
+		{IP: "1.2.3.4", Hostname: "gamelift.eu-west-1\n6.6.6.6 evil.example"},
+		{IP: "1.2.3.4", Hostname: "a b"},
+		{IP: "1.2.3.4", Hostname: "a\x00b"},
+		{IP: "1.2.3.4", Hostname: ""},
+		{IP: "1.2.3.4 evil", Hostname: "gamelift.us-east-1.amazonaws.com"},
+		{IP: "not-an-ip", Hostname: "gamelift.us-east-1.amazonaws.com"},
+	} {
+		p := writeTemp(t, "127.0.0.1 localhost\n")
+		h := &Hosts{Path: p}
+		if err := h.Update([]string{"localhost"}, []Entry{e}); err == nil {
+			t.Errorf("%q accepted", e)
+		}
+		if got := read(t, p); got != "127.0.0.1 localhost\n" {
+			t.Errorf("%q: file changed to %q", e, got)
+		}
+	}
+	if err := (&Hosts{Path: writeTemp(t, "")}).Save("::1", "gamelift.us-east-1.amazonaws.com"); err != nil {
+		t.Errorf("valid IPv6 entry rejected: %v", err)
+	}
+}

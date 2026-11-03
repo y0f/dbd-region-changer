@@ -3,8 +3,8 @@ package version
 
 import (
 	"fmt"
+	"regexp"
 	"strconv"
-	"strings"
 )
 
 // Stage is the dev/alpha/beta/rc/final release qualifier.
@@ -38,33 +38,38 @@ func init() {
 	}
 }
 
-var stageNames = map[string]Stage{"dev": Dev, "alpha": Alpha, "beta": Beta, "rc": RC}
+var stageNames = map[string]Stage{"dev": Dev, "a": Alpha, "alpha": Alpha, "b": Beta, "beta": Beta, "rc": RC}
 
-// Parse reads a SemVer string as produced by Semver, with an optional leading
-// "v": "1.2.3", "v1.2.3" or "1.2.3-rc.4".
+// versionRe matches an optional "v", MAJOR.MINOR[.PATCH] and an optional stage
+// in either SemVer or PEP-440 form, so every release tag the updater accepts
+// and every string Semver or Display produces parses: 1.2.3, v1.2.3,
+// 1.2.0-rc.4, 1.2rc4, 1.2.0.rc1, 1.2.0-b2, 1.2.dev0. A missing patch or stage
+// number is 0. Each number is at most 9 digits so it always fits an int (even
+// 32-bit); the updater and the build-script tag gates use the same bound.
+var versionRe = regexp.MustCompile(`^v?(\d{1,9})\.(\d{1,9})(?:\.(\d{1,9}))?(?:[.-]?(dev|alpha|beta|a|b|rc)\.?(\d{1,9})?)?$`)
+
+// Parse reads a version or release tag: the SemVer form produced by Semver,
+// the PEP-440 form produced by Display, or any release tag form the updater
+// accepts, each with an optional leading "v".
 func Parse(s string) (Info, error) {
-	core, pre, hasPre := strings.Cut(strings.TrimPrefix(s, "v"), "-")
-	nums := strings.Split(core, ".")
-	if len(nums) != 3 {
-		return Info{}, fmt.Errorf("version %q: want MAJOR.MINOR.PATCH", s)
+	m := versionRe.FindStringSubmatch(s)
+	if m == nil {
+		return Info{}, fmt.Errorf("version %q: want MAJOR.MINOR[.PATCH][stageN]", s)
 	}
-	var v [3]int
-	for i, n := range nums {
+	var v [4]int
+	for i, n := range []string{m[1], m[2], m[3], m[5]} {
+		if n == "" {
+			continue
+		}
 		x, err := strconv.Atoi(n)
-		if err != nil || x < 0 {
+		if err != nil {
 			return Info{}, fmt.Errorf("version %q: bad number %q", s, n)
 		}
 		v[i] = x
 	}
 	info := Info{Major: v[0], Minor: v[1], Patch: v[2], Stage: Final}
-	if hasPre {
-		name, num, _ := strings.Cut(pre, ".")
-		st, ok := stageNames[name]
-		n, err := strconv.Atoi(num)
-		if !ok || err != nil || n < 0 {
-			return Info{}, fmt.Errorf("version %q: bad pre-release %q", s, pre)
-		}
-		info.Stage, info.Num = st, n
+	if m[4] != "" {
+		info.Stage, info.Num = stageNames[m[4]], v[3]
 	}
 	return info, nil
 }

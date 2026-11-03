@@ -19,14 +19,21 @@ if ($LASTEXITCODE -ne 0) { $tag = "" }
 $ErrorActionPreference = "Stop"
 $ldflags = "-s -w -H windowsgui"
 $verArgs = @()
-if ($tag -match '^v?(\d+)\.(\d+)\.(\d+)') {
-    $ver = "$($Matches[1]).$($Matches[2]).$($Matches[3])"
+# Only tags both version.Parse and the updater accept (pinned by
+# internal/updater/buildtag_test.go); an unparsable tag would silently ship the
+# fallback version or never be offered as an update, so refuse to build.
+# [0-9], not \d: .NET's \d also matches non-ASCII digits.
+if ($tag -cmatch '^v?([0-9]{1,9})\.([0-9]{1,9})(?:\.([0-9]{1,9}))?(?:[.-]?(?:dev|a|b|rc)[0-9]{0,9})?$') {
+    $patch = if ($Matches[3]) { $Matches[3] } else { "0" }
+    $ver = "$($Matches[1]).$($Matches[2]).$patch"
     $ldflags += " -X github.com/y0f/dbd-region-changer/internal/version.tag=$tag"
     $verArgs = @(
-        "-ver-major=$($Matches[1])", "-ver-minor=$($Matches[2])", "-ver-patch=$($Matches[3])",
-        "-product-ver-major=$($Matches[1])", "-product-ver-minor=$($Matches[2])", "-product-ver-patch=$($Matches[3])",
+        "-ver-major=$($Matches[1])", "-ver-minor=$($Matches[2])", "-ver-patch=$patch",
+        "-product-ver-major=$($Matches[1])", "-product-ver-minor=$($Matches[2])", "-product-ver-patch=$patch",
         "-file-version=$ver", "-product-version=$ver"
     )
+} elseif ($tag) {
+    throw "tag $tag is not MAJOR.MINOR[.PATCH][stageN]"
 }
 
 # Generate the Windows resource object (.syso) consumed by the linker.
