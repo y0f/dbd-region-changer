@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://habbofont.net/font/halloween_3/dbd+region+changer.gif" alt="DBD Region Changer">
+  <img src="docs/img/title.png" alt="DBD Region Changer" width="520">
 </p>
 
 <p align="center">
@@ -11,8 +11,8 @@
 
 ---
 
-Small desktop app that locks Dead by Daylight to the AWS region you pick. It firewall-blocks the
-ping beacons of every other region so the game can only measure and match into the one you chose.
+Small desktop app that steers Dead by Daylight toward the AWS region you pick. It firewall-blocks
+the discovered ping beacon addresses of the other regions.
 On Windows the block applies only to the DBD executable; on Linux it is system-wide. Windows and
 Linux (Proton works).
 
@@ -20,7 +20,7 @@ Linux (Proton works).
 > Anti-Cheat.
 
 <p align="center">
-  <img src="docs/img/preview.png" alt="Preview" width="430">
+  <img src="docs/img/preview.png" alt="DBD Region Changer with a black, grayscale and blue interface" width="620">
 </p>
 
 ## Download
@@ -44,7 +44,9 @@ flowchart LR
 - **Linux**: `pkexec` asks for your password when the firewall changes.
 - **Set Default** removes the rules and restores normal matchmaking. Closing the app keeps the
   block (the next start shows it again), so click Set Default before you delete the app.
-- Ping bars show latency per region. The beacon addresses rotate, so on Windows the block picks up
+- Latency rows show endpoint measurements; TCP fallback is labeled as an estimate. These are not
+  readings from the game, and matchmaking is still controlled by DBD.
+- The beacon addresses rotate, so on Windows the block picks up
   new ones every minute while the app is open. On Linux that would need a password prompt each
   time, so there the block is renewed only when you click Set Server.
 
@@ -78,7 +80,7 @@ redirect.
 
 ## Building
 
-Go 1.25+ and a C toolchain (the GUI uses cgo + OpenGL).
+Go 1.26.10+ and a C toolchain (the GUI uses cgo + OpenGL).
 
 ```powershell
 # Windows (MinGW gcc on PATH). Embeds the icon and the admin manifest the app needs
@@ -93,7 +95,11 @@ Go 1.25+ and a C toolchain (the GUI uses cgo + OpenGL).
 
 Both write to `dist/`. Tests: `bash scripts/test.sh` runs the pure-Go `internal/` tests without a
 C toolchain but skips the GUI package `ui/`; the full suite, `ui/` included, needs gcc:
-`CGO_ENABLED=1 go test ./...`. Linux build check from Windows (Docker): `./scripts/linux-test.ps1`.
+`CGO_ENABLED=1 go test -race ./...`. Linux build check from Windows (Docker): `./scripts/linux-test.ps1`.
+
+The README screenshot is captured from the running app with live measurements:
+`LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a go run ./scripts/preview docs/img/preview.png`.
+The capture uses a temporary profile and leaves the firewall unchanged.
 
 ## License
 
