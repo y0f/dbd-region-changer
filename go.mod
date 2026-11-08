@@ -6,8 +6,8 @@ require (
 	fyne.io/fyne/v2 v2.7.4
 	github.com/Masterminds/semver/v3 v3.5.0
 	github.com/gofrs/flock v0.13.0
-	github.com/nfnt/resize v0.0.0-20180221191011-83c6a9932646
 	github.com/prometheus-community/pro-bing v0.9.0
+	golang.org/x/image v0.47.0
 	golang.org/x/sys v0.49.0
 )
 
@@ -33,6 +33,7 @@ require (
 	github.com/jsummers/gobmp v0.0.0-20230614200233-a9de23ed2e25 // indirect
 	github.com/kr/text v0.2.0 // indirect
 	github.com/mattn/go-runewidth v0.0.17 // indirect
+	github.com/nfnt/resize v0.0.0-20180221191011-83c6a9932646 // indirect
 	github.com/nicksnyder/go-i18n/v2 v2.5.1 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/rivo/uniseg v0.2.0 // indirect
@@ -42,7 +43,6 @@ require (
 	github.com/srwiley/rasterx v0.0.0-20220730225603-2ab79fcdd4ef // indirect
 	github.com/stretchr/testify v1.11.1 // indirect
 	github.com/yuin/goldmark v1.7.17 // indirect
-	golang.org/x/image v0.47.0 // indirect
 	golang.org/x/net v0.62.0 // indirect
 	golang.org/x/sync v0.24.0 // indirect
 	golang.org/x/text v0.43.0 // indirect

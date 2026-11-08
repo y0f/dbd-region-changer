@@ -27,7 +27,7 @@ type Info struct {
 // Current is the app version. Release builds override it from the git tag via
 // -ldflags "-X github.com/y0f/dbd-region-changer/internal/version.tag=<tag>"
 // (see scripts/build-*.sh/ps1); the literal is the fallback for plain builds.
-var Current = Info{Major: 1, Minor: 0, Patch: 1, Stage: Final, Num: 0}
+var Current = Info{Major: 1, Minor: 0, Patch: 2, Stage: Final, Num: 0}
 
 // tag is set at link time; an unparsable value is ignored.
 var tag string

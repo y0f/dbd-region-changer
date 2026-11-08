@@ -11,7 +11,7 @@ import (
 	"image/png"
 	"os"
 
-	"github.com/nfnt/resize"
+	"golang.org/x/image/draw"
 )
 
 func main() {
@@ -26,18 +26,24 @@ func main() {
 	img, _, err := image.Decode(src)
 	must(err)
 
-	must(writePNG("assets/icon.png", resize.Resize(256, 256, img, resize.Lanczos3)))
+	must(writePNG("assets/icon.png", resized(img, 256)))
 
 	// Multi-size Windows .ico (PNG-encoded entries, valid on Vista+).
 	sizes := []uint{16, 32, 48, 64, 128, 256}
 	frames := make([][]byte, len(sizes))
 	for i, s := range sizes {
 		var b bytes.Buffer
-		must(png.Encode(&b, resize.Resize(s, s, img, resize.Lanczos3)))
+		must(png.Encode(&b, resized(img, int(s))))
 		frames[i] = b.Bytes()
 	}
 	must(writeICO("build/icon.ico", sizes, frames))
 	fmt.Println("wrote assets/icon.png and build/icon.ico")
+}
+
+func resized(src image.Image, size int) image.Image {
+	dst := image.NewNRGBA(image.Rect(0, 0, size, size))
+	draw.CatmullRom.Scale(dst, dst.Bounds(), src, src.Bounds(), draw.Src, nil)
+	return dst
 }
 
 func writePNG(path string, img image.Image) error {

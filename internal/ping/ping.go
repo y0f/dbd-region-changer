@@ -1,4 +1,4 @@
-// Package ping measures ICMP latency per region and maps it to a status color.
+// Package ping measures ICMP latency per region, with a TCP fallback.
 // Note: pro-bing's PacketLoss is already a percentage (0-100).
 package ping
 
@@ -10,29 +10,6 @@ import (
 
 	probing "github.com/prometheus-community/pro-bing"
 )
-
-type Color int
-
-const (
-	Green Color = iota
-	Orange
-	Red
-	Grey
-)
-
-// ColorFor maps latency ms to a status color; -1 (failure) is grey.
-func ColorFor(ms int) Color {
-	switch {
-	case ms <= 100 && ms != -1:
-		return Green
-	case ms > 100 && ms <= 200:
-		return Orange
-	case ms > 200:
-		return Red
-	default:
-		return Grey
-	}
-}
 
 type Result struct {
 	RTTAvgMs float64

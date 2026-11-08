@@ -67,6 +67,8 @@ type fakeSystem struct {
 	clears   int
 	hostsOps int
 	applyErr error
+	clearErr error
+	hostsErr error
 }
 
 func newFakeSystem(t *testing.T, silent bool) *fakeSystem {
@@ -97,13 +99,13 @@ func newFakeSystem(t *testing.T, silent bool) *fakeSystem {
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		f.clears++
-		return nil
+		return f.clearErr
 	}
 	writeHosts = func(elevate.Payload) error {
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		f.hostsOps++
-		return nil
+		return f.hostsErr
 	}
 	appliedStateFile = func() string { return stateFile }
 	return f
@@ -138,14 +140,18 @@ func (a *App) state() (string, map[string]bool) {
 // The beacon name rotates through a pool, one address per answer, so a single
 // lookup would block only part of it.
 func TestBlockIPsCollectsRotatingBeaconPool(t *testing.T) {
-	pool := []string{"3.83.203.126", "98.93.6.62"}
-	var n atomic.Int32
-	res := stubDoH(t, func(name string) []string {
-		if name != "gamelift-ping.us-east-1.api.aws" {
-			return []string{"10.0.0.1"}
+	pool := []string{"192.0.2.1", "192.0.2.2", "2001:db8::1", "2001:db8::2"}
+	var v4, v6 atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		prefix, counter := "192.0.2.", &v4
+		if r.URL.Query().Get("type") == "AAAA" {
+			prefix, counter = "2001:db8::", &v6
 		}
-		return []string{pool[int(n.Add(1)-1)%len(pool)]}
-	})
+		ip := fmt.Sprintf("%s%d", prefix, (counter.Add(1)-1)%2+1)
+		fmt.Fprintf(w, `{"Answer":[{"data":%q}]}`, ip)
+	}))
+	defer srv.Close()
+	res := doh.New([]doh.Provider{{Name: "rotating", URL: srv.URL}})
 	a := newTestApp(t, []region.Server{{Code: "eu-west-1"}, {Code: "us-east-1"}}, res, "")
 	if got, err := a.blockIPs("eu-west-1"); err != nil || !slices.Equal(got, pool) {
 		t.Fatalf("blockIPs = %v, %v, want the whole pool %v", got, err, pool)
@@ -253,7 +259,7 @@ func TestRestoreAppliedShowsBlockFromLastSession(t *testing.T) {
 	a := newTestApp(t, regions, stubDoH(t, func(string) []string { return nil }), "")
 	a.restoreApplied()
 	a.refreshCurrent()
-	if got := a.currentLabel.Text; got != "You are on: Europe (Ireland) (eu-west-1)" {
+	if got := a.currentLabel.Text; got != "Locked to Europe (Ireland)" {
 		t.Fatalf("label = %q", got)
 	}
 	if len(fs.applied)+fs.clears != 0 {

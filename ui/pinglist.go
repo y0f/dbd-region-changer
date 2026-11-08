@@ -1,59 +1,98 @@
 package ui
 
 import (
+	"fmt"
 	"image/color"
 
 	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 
 	"github.com/y0f/dbd-region-changer/internal/ping"
-)
-
-var (
-	colGreen  = color.NRGBA{R: 0x4C, G: 0xAF, B: 0x50, A: 0xFF}
-	colOrange = color.NRGBA{R: 0xFF, G: 0x98, B: 0x00, A: 0xFF}
-	colRed    = color.NRGBA{R: 0xF4, G: 0x43, B: 0x36, A: 0xFF}
-	colGrey   = color.NRGBA{R: 0x9E, G: 0x9E, B: 0x9E, A: 0xFF}
+	"github.com/y0f/dbd-region-changer/internal/region"
 )
 
 func pingColor(ms int) color.Color {
-	switch ping.ColorFor(ms) {
-	case ping.Green:
-		return colGreen
-	case ping.Orange:
-		return colOrange
-	case ping.Red:
-		return colRed
-	default:
-		return colGrey
+	if ms < 0 {
+		return colMuted
 	}
+	return colFg
+}
+
+func latencyText(ms int) string {
+	if ms < 0 {
+		return "—"
+	}
+	return fmt.Sprintf("%d ms", ms)
 }
 
 type PingRow struct {
-	Text  string
-	Color color.Color
+	Name, Code, Latency, Loss string
+	Color                     color.Color
 }
 
-// PingList stacks color-coded text rows (canvas.Text allows arbitrary RGB, unlike widget.RichText).
-type PingList struct {
-	box *fyne.Container
-}
-
-func NewPingList() *PingList {
-	return &PingList{box: container.NewVBox()}
-}
-
-func (p *PingList) Object() fyne.CanvasObject {
-	return p.box
-}
-
-// SetRows replaces the rows; must run on the UI goroutine (via fyne.Do).
-func (p *PingList) SetRows(rows []PingRow) {
-	objs := make([]fyne.CanvasObject, 0, len(rows))
-	for _, r := range rows {
-		t := newMonoText(r.Text, r.Color)
-		objs = append(objs, t)
+func pingRows(regions []region.Server, results []ping.Result) []PingRow {
+	rows := make([]PingRow, len(regions))
+	for i, r := range regions {
+		res := ping.Result{}
+		if i < len(results) {
+			res = results[i]
+		}
+		latency, loss := latencyText(res.DisplayPing()), "No response"
+		if res.OK {
+			loss = fmt.Sprintf("%.0f%% loss", res.DisplayLossPct())
+			if res.Fallback {
+				loss = "TCP estimate"
+			}
+		}
+		rows[i] = PingRow{r.Pretty, r.Code, latency, loss, pingColor(res.DisplayPing())}
 	}
-	p.box.Objects = objs
+	return rows
+}
+
+// PingList reuses its text objects between samples. The region set is small
+// and fixed after discovery, so a virtualized list adds no useful complexity.
+type PingList struct {
+	box  *fyne.Container
+	rows [][4]*canvas.Text
+}
+
+func NewPingList() *PingList { return &PingList{box: container.NewVBox()} }
+
+func (p *PingList) Object() fyne.CanvasObject { return p.box }
+
+// SetRows must run on the UI goroutine.
+func (p *PingList) SetRows(rows []PingRow) {
+	if len(rows) != len(p.rows) {
+		p.rows = make([][4]*canvas.Text, len(rows))
+		p.box.Objects = make([]fyne.CanvasObject, len(rows))
+		for i := range rows {
+			name := newColoredText("", colFg)
+			name.TextSize = 14
+			code := newMonoText("", colMuted)
+			code.TextSize = 11
+			latency := newMonoText("", colFg)
+			latency.Alignment = fyne.TextAlignTrailing
+			loss := newColoredText("", colMuted)
+			loss.TextSize = 11
+			loss.Alignment = fyne.TextAlignTrailing
+			p.rows[i] = [4]*canvas.Text{name, code, latency, loss}
+			p.box.Objects[i] = container.NewBorder(nil, nil, nil,
+				container.NewVBox(latency, loss), container.NewVBox(name, code))
+		}
+	}
+	for i, row := range rows {
+		for j, value := range []string{row.Name, row.Code, row.Latency, row.Loss} {
+			obj := p.rows[i][j]
+			col := color.Color(colMuted)
+			if j == 0 || j == 2 {
+				col = row.Color
+			}
+			if obj.Text != value || obj.Color != col {
+				obj.Text, obj.Color = value, col
+				obj.Refresh()
+			}
+		}
+	}
 	p.box.Refresh()
 }

@@ -6,6 +6,7 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
 	"github.com/y0f/dbd-region-changer/internal/config"
@@ -24,19 +25,19 @@ func (a *App) openURL(raw string) {
 }
 
 func (a *App) buildTitle() fyne.CanvasObject {
-	title := canvas.NewText("DBD Region Changer", colAccent)
+	title := canvas.NewText("DBD Region Changer", colFg)
 	title.TextStyle = fyne.TextStyle{Bold: true}
-	title.TextSize = 20
+	title.TextSize = 22
 
 	ver := canvas.NewText("v"+version.Current.Display(), colMuted)
 	ver.TextSize = 12
 
 	gh := widget.NewButton("GitHub", func() { a.openURL(config.GithubRepoURL) })
 	gh.Importance = widget.LowImportance
-	menu := widget.NewButton("...", a.showMenu)
+	menu := widget.NewButtonWithIcon("", theme.MoreHorizontalIcon(), a.showMenu)
 	menu.Importance = widget.LowImportance
 
-	left := container.NewHBox(title, container.NewCenter(ver))
+	left := container.NewVBox(title, ver)
 	right := container.NewHBox(gh, menu)
 	return container.NewBorder(nil, nil, left, right)
 }
@@ -45,7 +46,7 @@ func (a *App) showMenu() {
 	menu := fyne.NewMenu("",
 		fyne.NewMenuItem("Set DBD path (firewall)", a.onSetDBDPath),
 		fyne.NewMenuItem("Check for updates", a.onCheckUpdates),
-		fyne.NewMenuItem("Dump logs", a.onDumpLogs),
+		fyne.NewMenuItem("Export logs", a.onDumpLogs),
 	)
 	size := a.win.Canvas().Size()
 	widget.ShowPopUpMenuAtPosition(menu, a.win.Canvas(), fyne.NewPos(size.Width-160, 40))

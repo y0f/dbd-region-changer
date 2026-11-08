@@ -2,23 +2,6 @@ package ping
 
 import "testing"
 
-func TestColorFor(t *testing.T) {
-	cases := []struct {
-		ms   int
-		want Color
-	}{
-		{50, Green}, {100, Green}, {0, Green},
-		{101, Orange}, {150, Orange}, {200, Orange},
-		{201, Red}, {300, Red},
-		{-1, Grey},
-	}
-	for _, c := range cases {
-		if got := ColorFor(c.ms); got != c.want {
-			t.Errorf("ColorFor(%d)=%v want %v", c.ms, got, c.want)
-		}
-	}
-}
-
 func TestSentinelOnFailure(t *testing.T) {
 	r := Result{} // OK == false
 	if r.DisplayPing() != -1 {

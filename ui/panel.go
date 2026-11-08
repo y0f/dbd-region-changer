@@ -6,20 +6,19 @@ import (
 	"fyne.io/fyne/v2/container"
 )
 
-// panel wraps content in a rounded, translucent wine surface with a hairline rim
-// so each section floats over the backdrop gradient. An empty title omits the header.
+// panel groups controls on a neutral surface. An empty title omits the header.
 func panel(title string, content fyne.CanvasObject) fyne.CanvasObject {
 	bg := canvas.NewRectangle(colPanel)
-	bg.CornerRadius = 10
+	bg.CornerRadius = 6
 	bg.StrokeColor = colPanelStroke
 	bg.StrokeWidth = 1
 
 	inner := content
 	if title != "" {
-		head := canvas.NewText(title, colAccent)
+		head := canvas.NewText(title, colMuted)
 		head.TextStyle = fyne.TextStyle{Bold: true}
 		head.TextSize = 13
-		inner = container.NewVBox(head, content)
+		inner = container.NewBorder(head, nil, nil, nil, content)
 	}
 	return container.NewStack(bg, container.NewPadded(inner))
 }
