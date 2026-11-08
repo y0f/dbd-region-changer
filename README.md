@@ -9,15 +9,17 @@
   <a href="https://github.com/y0f/dbd-region-changer/releases/latest"><img src="https://img.shields.io/github/v/release/y0f/dbd-region-changer?include_prereleases&sort=semver" alt="Release"></a>
 </p>
 
----
+# Dead by Daylight Region Changer
 
-Small desktop app that steers Dead by Daylight toward the AWS region you pick. It firewall-blocks
-the discovered ping beacon addresses of the other regions.
-On Windows the block applies only to the DBD executable; on Linux it is system-wide. Windows and
-Linux (Proton works).
+**DBD Region Changer** is a free, open-source Dead by Daylight server region switcher for
+**Windows and Linux**. Select a preferred AWS region, compare ping-beacon latency, and apply or
+remove the region lock from one desktop window.
 
-> Close DBD before changing region and launch it after. Changing while it runs can flag Easy
-> Anti-Cheat.
+The app blocks the discovered GameLift ping beacon addresses of other regions with firewall rules.
+On Windows the block applies only to the DBD executable; on Linux it is system-wide. No game files
+are modified. Matchmaking remains controlled by DBD, so a particular server is not guaranteed.
+
+> Close Dead by Daylight before changing regions. Launch the game after the change completes.
 
 <p align="center">
   <img src="docs/img/preview.png" alt="DBD Region Changer with a black, grayscale and blue interface" width="620">
@@ -27,6 +29,21 @@ Linux (Proton works).
 
 Single binary, no installer, on the [releases](https://github.com/y0f/dbd-region-changer/releases/latest)
 page. Each release from 1.0.1 on ships a `SHA256SUMS` file to verify the download.
+
+## Windows and Linux support
+
+| Platform | Download | Requirements |
+|---|---|---|
+| Windows x64 | `dbdregion-windows-amd64.exe` | Administrator access for Windows Firewall |
+| Linux x86-64 | `dbdregion-linux-amd64` | glibc 2.34+, X11 or XWayland, OpenGL, iptables/ip6tables, and pkexec with a polkit authentication agent |
+
+The tool runs natively on Linux. Dead by Daylight itself runs through Proton; Behaviour confirms
+[continued Steam Deck and Proton support](https://steamcommunity.com/games/381210/announcements/detail/683011656593179781).
+
+Both builds pass race tests and static analysis in [CI](https://github.com/y0f/dbd-region-changer/actions/workflows/ci.yml).
+The Linux package also passes a graphical startup check. IPv4/IPv6 firewall creation, replacement,
+and cleanup have been checked in an isolated Linux network namespace. In-game matchmaking has
+not been tested with this release.
 
 ## Usage
 
