@@ -7,15 +7,7 @@ echo "== go test (full, CGO) =="
 CGO_ENABLED=1 go test ./...
 
 echo "== build linux binary =="
-if ! CGO_ENABLED=1 go build -ldflags='-s -w' -trimpath -o /tmp/dbdregion ./cmd/dbd 2>/tmp/build.log; then
-  if grep -q "no Go files\|cannot find package\|matched no packages" /tmp/build.log; then
-    echo "(cmd/dbd not present yet; library build + tests passed)"
-    echo "ALL AVAILABLE LINUX CHECKS PASSED"
-    exit 0
-  fi
-  cat /tmp/build.log
-  exit 1
-fi
+CGO_ENABLED=1 go build -ldflags='-s -w' -trimpath -o /tmp/dbdregion ./cmd/dbd
 
 echo "== headless GUI smoke (Xvfb + software OpenGL, 6s window) =="
 set +e

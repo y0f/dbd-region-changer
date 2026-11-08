@@ -1,3 +1,6 @@
 # Shell scripts run inside Linux containers and on Linux: always LF, also on a
 # Windows checkout with core.autocrlf.
 *.sh text eol=lf
+*.go text eol=lf
+go.mod text eol=lf
+go.sum text eol=lf

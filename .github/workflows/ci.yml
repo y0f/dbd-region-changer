@@ -16,7 +16,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.26"
+          go-version-file: go.mod
           cache: true
       - name: Install Fyne / CGO build deps
         run: |
@@ -25,6 +25,10 @@ jobs:
             gcc libgl1-mesa-dev xorg-dev libxkbcommon-dev
       - name: Vet
         run: go vet ./...
+      - name: Check formatting
+        run: test -z "$(gofmt -l .)"
+      - name: Vulnerability check
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
       - name: Test (full, CGO + race)
         env:
           CGO_ENABLED: "1"
@@ -41,21 +45,19 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.26"
+          go-version-file: go.mod
           cache: true
       - name: Set up MinGW (gcc for CGO)
         uses: egor-tensin/setup-mingw@v2
         with:
           platform: x64
           static: 0
-      - name: Test (pure-Go logic)
-        env:
-          CGO_ENABLED: "0"
-        run: go test ./internal/...
-      - name: Test GUI logic (CGO)
+      - name: Test (full, CGO + race)
         env:
           CGO_ENABLED: "1"
-        run: go test ./ui/...
+        run: go test -race ./...
+      - name: Vet
+        run: go vet ./...
       - name: Build all packages (incl. GUI, CGO)
         env:
           CGO_ENABLED: "1"
