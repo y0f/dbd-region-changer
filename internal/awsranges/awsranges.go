@@ -7,6 +7,7 @@
 package awsranges
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -56,13 +57,17 @@ type cached struct {
 // sorted and deduped. When the download fails but an earlier result is cached,
 // the cached codes are returned instead of an error.
 func RegionCodes(client *http.Client) ([]string, error) {
+	return RegionCodesContext(context.Background(), client)
+}
+
+func RegionCodesContext(ctx context.Context, client *http.Client) ([]string, error) {
 	if client == nil {
 		client = &http.Client{Timeout: 15 * time.Second}
 	}
 	path := cachePath()
 	prev := readCache(path)
 
-	codes, fresh, err := fetch(client, prev)
+	codes, fresh, err := fetch(ctx, client, prev)
 	if err != nil {
 		if prev != nil && len(prev.Codes) > 0 {
 			return prev.Codes, nil
@@ -77,8 +82,8 @@ func RegionCodes(client *http.Client) ([]string, error) {
 
 // fetch performs a conditional GET. On 304 it returns prev's codes and a nil
 // cache entry; on 200 it returns the parsed codes and the entry to store.
-func fetch(client *http.Client, prev *cached) ([]string, *cached, error) {
-	req, err := http.NewRequest(http.MethodGet, ipRangesURL, nil)
+func fetch(ctx context.Context, client *http.Client, prev *cached) ([]string, *cached, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ipRangesURL, nil)
 	if err != nil {
 		return nil, nil, err
 	}

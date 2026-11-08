@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"strings"
+	"unicode"
 )
 
 type Entry struct {
@@ -22,7 +23,8 @@ type Hosts struct {
 
 func New() *Hosts { return &Hosts{Path: defaultPath()} }
 
-// List returns [ip, hostname] pairs for lines passing callback (nil accepts all); '#' lines and single-field lines are skipped.
+// List returns every hostname, including aliases, with case and trailing dots
+// normalized. Comments and malformed lines are ignored.
 func (h *Hosts) List(callback func(hostname string) bool) ([][2]string, error) {
 	data, err := os.ReadFile(h.Path)
 	if err != nil {
@@ -30,15 +32,16 @@ func (h *Hosts) List(callback func(hostname string) bool) ([][2]string, error) {
 	}
 	var out [][2]string
 	for _, raw := range strings.SplitAfter(string(data), "\n") {
-		if strings.HasPrefix(raw, "#") {
+		body, _, _ := strings.Cut(raw, "#")
+		fields := strings.Fields(body)
+		if len(fields) < 2 || net.ParseIP(fields[0]) == nil {
 			continue
 		}
-		fields := strings.Fields(strings.TrimSpace(raw))
-		if len(fields) < 2 {
-			continue
-		}
-		if callback == nil || callback(fields[1]) {
-			out = append(out, [2]string{fields[0], fields[1]})
+		for _, alias := range fields[1:] {
+			hostname := normalize(alias)
+			if callback == nil || callback(hostname) {
+				out = append(out, [2]string{fields[0], hostname})
+			}
 		}
 	}
 	return out, nil
@@ -49,12 +52,12 @@ func (h *Hosts) Save(ip, hostname string) error {
 	return h.Update(nil, []Entry{{IP: ip, Hostname: hostname}})
 }
 
-// Remove drops every line whose second field equals hostname; shorter lines are kept verbatim.
+// Remove removes hostname, preserving other aliases and comments on its line.
 func (h *Hosts) Remove(hostname string) error {
 	return h.Update([]string{hostname}, nil)
 }
 
-// RemoveAll drops every line whose second field is one of hostnames.
+// RemoveAll removes the named hosts, preserving unrelated aliases and comments.
 func (h *Hosts) RemoveAll(hostnames []string) error {
 	return h.Update(hostnames, nil)
 }
@@ -64,7 +67,7 @@ func (h *Hosts) Apply(entries []Entry) error {
 	return h.Update(nil, entries)
 }
 
-// Update removes every line whose second field is one of remove, then appends
+// Update removes matching hostnames and aliases, then appends
 // entries, in a single read and at most one write. Appended lines use the
 // file's line ending (CRLF if it already has any) and end with a newline, so a
 // later append by another tool starts on its own line. An entry with an
@@ -96,16 +99,20 @@ func (e Entry) validate() error {
 	if net.ParseIP(e.IP) == nil {
 		return fmt.Errorf("hostsfile: invalid IP %q", e.IP)
 	}
-	if e.Hostname == "" || strings.IndexFunc(e.Hostname, func(r rune) bool { return r <= ' ' || r == 0x7f }) >= 0 {
+	if e.Hostname == "" || strings.IndexFunc(e.Hostname, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) || r == '#' }) >= 0 {
 		return fmt.Errorf("hostsfile: invalid hostname %q", e.Hostname)
 	}
 	return nil
 }
 
+func normalize(hostname string) string {
+	return strings.ToLower(strings.TrimSuffix(hostname, "."))
+}
+
 func edit(data []byte, remove []string, entries []Entry) []byte {
 	drop := make(map[string]bool, len(remove))
 	for _, hn := range remove {
-		drop[hn] = true
+		drop[normalize(hn)] = true
 	}
 	eol := "\n"
 	if bytes.Contains(data, []byte("\r\n")) {
@@ -114,11 +121,34 @@ func edit(data []byte, remove []string, entries []Entry) []byte {
 	var b strings.Builder
 	b.Grow(len(data))
 	for _, line := range strings.SplitAfter(string(data), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) >= 2 && drop[fields[1]] {
+		body, comment, hasComment := strings.Cut(strings.TrimRight(line, "\r\n"), "#")
+		fields := strings.Fields(body)
+		if len(fields) < 2 || net.ParseIP(fields[0]) == nil {
+			b.WriteString(line)
 			continue
 		}
-		b.WriteString(line)
+		kept := []string{fields[0]}
+		for _, alias := range fields[1:] {
+			if !drop[normalize(alias)] {
+				kept = append(kept, alias)
+			}
+		}
+		if len(kept) == len(fields) {
+			b.WriteString(line)
+			continue
+		}
+		if len(kept) > 1 {
+			b.WriteString(strings.Join(kept, " "))
+			if hasComment {
+				b.WriteString(" ")
+			}
+		}
+		if hasComment {
+			b.WriteString("#" + comment)
+		}
+		if (len(kept) > 1 || hasComment) && strings.HasSuffix(line, "\n") {
+			b.WriteString(eol)
+		}
 	}
 	if len(entries) > 0 && b.Len() > 0 && !strings.HasSuffix(b.String(), "\n") {
 		b.WriteString(eol)

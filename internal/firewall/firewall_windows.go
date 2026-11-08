@@ -3,6 +3,8 @@
 package firewall
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"path/filepath"
@@ -33,12 +35,18 @@ func Apply(program string, ips []string) error {
 	if len(ips) == 0 {
 		return Clear()
 	}
-	deleteRules(pendingRuleName)
-	if err := add(pendingRuleName, program, ips); err != nil {
-		deleteRules(pendingRuleName)
+	if err := deleteRules(pendingRuleName); err != nil {
 		return err
 	}
-	deleteRules(ruleName)
+	if err := add(pendingRuleName, program, ips); err != nil {
+		if cleanup := deleteRules(pendingRuleName); cleanup != nil {
+			return errors.Join(err, cleanup)
+		}
+		return fmt.Errorf("%w: %v", ErrNotRun, err)
+	}
+	if err := deleteRules(ruleName); err != nil {
+		return err
+	}
 	if _, err := runNetsh("advfirewall", "firewall", "set", "rule",
 		"name="+pendingRuleName, "new", "name="+ruleName); err != nil {
 		// The new block is active under the staging name; Clear removes both.
@@ -54,6 +62,9 @@ func Add(program string, ips []string) error {
 }
 
 func add(name, program string, ips []string) error {
+	if program == "" || !filepath.IsAbs(program) {
+		return errors.New("an absolute game executable path is required")
+	}
 	for _, group := range chunk(ips, maxCIDRsPerRule) {
 		args := []string{
 			"advfirewall", "firewall", "add", "rule",
@@ -73,15 +84,33 @@ func add(name, program string, ips []string) error {
 
 // Clear removes all rules this tool created.
 func Clear() error {
-	deleteRules(ruleName)
-	deleteRules(pendingRuleName)
-	return nil
+	return deleteRules(ruleName, pendingRuleName)
 }
 
-// deleteRules removes every rule called name. A delete with no matching rule
-// returns an error; that is not a failure.
-func deleteRules(name string) {
-	_, _ = runNetsh("advfirewall", "firewall", "delete", "rule", "name="+name)
+// COM distinguishes an absent rule from access denied; netsh reports both as
+// exit code 1 with localized text. Remove each matching rule, including chunks
+// that share a name, without swallowing permission or service failures.
+var deleteRules = removeWindowsRules
+
+func removeWindowsRules(names ...string) error {
+	quoted := make([]string, len(names))
+	for i, name := range names {
+		quoted[i] = "'" + strings.ReplaceAll(name, "'", "''") + "'"
+	}
+	script := "$ErrorActionPreference = 'Stop'; try { " +
+		"$rules = (New-Object -ComObject HNetCfg.FwPolicy2).Rules; " +
+		"$names = @(" + strings.Join(quoted, ",") + "); " +
+		"@($rules | Where-Object { $names -contains $_.Name }) | ForEach-Object { $rules.Remove($_.Name) }" +
+		" } catch { [Console]::Error.WriteLine($_); exit 1 }"
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, powershellPath, "-NoProfile", "-NonInteractive", "-Command", script)
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("remove firewall rules: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 // addWithRetry works around transient "Windows Defender Firewall error (0x2)"
@@ -112,8 +141,12 @@ var netshPath = func() string {
 	return filepath.Join(dir, "netsh.exe")
 }()
 
+var powershellPath = filepath.Join(filepath.Dir(netshPath), "WindowsPowerShell", "v1.0", "powershell.exe")
+
 func runNetsh(args ...string) (string, error) {
-	cmd := exec.Command(netshPath, args...)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, netshPath, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	out, err := cmd.CombinedOutput()
 	if err != nil {

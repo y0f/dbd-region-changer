@@ -3,6 +3,8 @@
 package firewall
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,9 +27,20 @@ func fakeNetsh(t *testing.T, failAdd bool) (logf string) {
 	if err := os.WriteFile(filepath.Join(dir, "netsh.bat"), []byte(bat), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	old := netshPath
+	old, oldDelete := netshPath, deleteRules
 	netshPath = filepath.Join(dir, "netsh.bat")
-	t.Cleanup(func() { netshPath = old })
+	deleteRules = func(names ...string) error {
+		f, err := os.OpenFile(logf, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		for _, name := range names {
+			fmt.Fprintf(f, "delete rule name=%s\"\n", name)
+		}
+		return nil
+	}
+	t.Cleanup(func() { netshPath, deleteRules = old, oldDelete })
 	return logf
 }
 
@@ -68,8 +81,8 @@ func deletesLive(call string) bool {
 // A failed add must leave the previous block in place.
 func TestApplyKeepsOldRulesWhenAddFails(t *testing.T) {
 	logf := fakeNetsh(t, true)
-	if err := Apply(`C:\fake\DeadByDaylight.exe`, []string{"192.0.2.1", "192.0.2.2"}); err == nil {
-		t.Fatal("expected add failure")
+	if err := Apply(`C:\fake\DeadByDaylight.exe`, []string{"192.0.2.1", "192.0.2.2"}); !errors.Is(err, ErrNotRun) {
+		t.Fatalf("want unchanged block, got %v", err)
 	}
 	for _, c := range calls(t, logf) {
 		if deletesLive(c) {
@@ -77,6 +90,36 @@ func TestApplyKeepsOldRulesWhenAddFails(t *testing.T) {
 		}
 		if strings.Contains(c, "add rule") && !strings.Contains(c, pendingRuleName) {
 			t.Fatalf("added directly to the live rule name: %q", c)
+		}
+	}
+}
+
+func TestClearReportsDeleteFailure(t *testing.T) {
+	fakeNetsh(t, false)
+	want := errors.New("access denied")
+	deleteRules = func(...string) error { return want }
+	if err := Clear(); !errors.Is(err, want) {
+		t.Fatalf("Clear = %v", err)
+	}
+	if err := Apply(`C:\fake\game.exe`, []string{"192.0.2.1"}); !errors.Is(err, want) {
+		t.Fatalf("Apply = %v", err)
+	}
+}
+
+func TestRemoveReportsUnavailablePowerShell(t *testing.T) {
+	old := powershellPath
+	powershellPath = filepath.Join(t.TempDir(), "missing.exe")
+	t.Cleanup(func() { powershellPath = old })
+	if err := removeWindowsRules(ruleName); err == nil {
+		t.Fatal("missing removal tool reported success")
+	}
+}
+
+func TestAddRequiresProgram(t *testing.T) {
+	fakeNetsh(t, false)
+	for _, program := range []string{"", "game.exe"} {
+		if err := Add(program, []string{"192.0.2.1"}); err == nil {
+			t.Fatalf("accepted unscoped rule: %q", program)
 		}
 	}
 }

@@ -41,6 +41,9 @@ func savedFile() (string, error) {
 
 // Save remembers path so later Find calls return it first.
 func Save(path string) error {
+	if !filepath.IsAbs(path) || !IsGameExe(path) {
+		return errors.New("DBD path must be an absolute path to the game's shipping executable")
+	}
 	fi, err := os.Stat(path)
 	if err != nil {
 		return err
@@ -69,7 +72,7 @@ func Saved() string {
 		return ""
 	}
 	p := strings.TrimSpace(string(data))
-	if p == "" || !isFile(p) {
+	if !filepath.IsAbs(p) || !IsGameExe(p) || !isFile(p) {
 		return ""
 	}
 	return p

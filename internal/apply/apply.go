@@ -1,4 +1,4 @@
-// Package apply owns the remove-then-write sequence that forces a region.
+// Package apply builds and writes hosts redirects for a selected region.
 package apply
 
 import (
@@ -16,7 +16,7 @@ type Resolver interface {
 // HostsWriter is satisfied by *hostsfile.Hosts.
 type HostsWriter interface {
 	RemoveAll(hostnames []string) error
-	Apply(entries []hostsfile.Entry) error
+	Update(remove []string, entries []hostsfile.Entry) error
 }
 
 // KnownHostnames returns every region's endpoint+dualstack hostname, used to strip stale entries.
@@ -72,10 +72,7 @@ func SetServer(h HostsWriter, selectedCode string, regions []region.Server, r Re
 	if err != nil {
 		return err
 	}
-	if err := h.RemoveAll(KnownHostnames(regions)); err != nil {
-		return err
-	}
-	return h.Apply(entries)
+	return h.Update(KnownHostnames(regions), entries)
 }
 
 // ClearServer removes every known entry (Set Default).

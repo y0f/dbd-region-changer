@@ -2,6 +2,7 @@
 package doh
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -48,6 +49,7 @@ type cacheEntry struct {
 }
 
 type Resolver struct {
+	ctx       context.Context
 	providers []Provider
 	client    *http.Client
 	now       func() time.Time
@@ -57,7 +59,12 @@ type Resolver struct {
 }
 
 func New(providers []Provider) *Resolver {
+	return NewContext(context.Background(), providers)
+}
+
+func NewContext(ctx context.Context, providers []Provider) *Resolver {
 	return &Resolver{
+		ctx:       ctx,
 		providers: providers,
 		client:    &http.Client{Timeout: 10 * time.Second},
 		now:       time.Now,
@@ -105,8 +112,21 @@ func (r *Resolver) ResolveFresh(hostname string) (string, error) {
 // dual-stack names can be blocked on both families. It fails only if neither
 // family resolves.
 func (r *Resolver) ResolveAll(hostname string) ([]string, error) {
-	v4, err4 := r.lookup(hostname, typeA, true)
-	v6, err6 := r.lookup(hostname, typeAAAA, true)
+	return r.resolveAll(hostname, true)
+}
+
+// ResolveAllFresh samples both address families without reading the TTL cache.
+func (r *Resolver) ResolveAllFresh(hostname string) ([]string, error) {
+	return r.resolveAll(hostname, false)
+}
+
+func (r *Resolver) resolveAll(hostname string, useCache bool) ([]string, error) {
+	var v4, v6 []string
+	var err4, err6 error
+	var wg sync.WaitGroup
+	wg.Go(func() { v4, err4 = r.lookup(hostname, typeA, useCache) })
+	wg.Go(func() { v6, err6 = r.lookup(hostname, typeAAAA, useCache) })
+	wg.Wait()
 	out := make([]string, 0, len(v4)+len(v6))
 	out = append(append(out, v4...), v6...)
 	if len(out) == 0 {
@@ -124,6 +144,9 @@ func (r *Resolver) lookup(hostname string, qtype int, useCache bool) ([]string, 
 	}
 	var lastErr error
 	for _, p := range r.providers {
+		if err := r.ctx.Err(); err != nil {
+			return nil, err
+		}
 		ips, ttl, err := r.query(p, hostname, qtype)
 		if err != nil {
 			lastErr = err
@@ -141,7 +164,7 @@ func (r *Resolver) lookup(hostname string, qtype int, useCache bool) ([]string, 
 // query returns the addresses of the requested type (skipping CNAMEs and other
 // records in the chain) and the smallest TTL among them.
 func (r *Resolver) query(p Provider, hostname string, qtype int) ([]string, time.Duration, error) {
-	req, err := http.NewRequest(http.MethodGet, p.URL, nil)
+	req, err := http.NewRequestWithContext(r.ctx, http.MethodGet, p.URL, nil)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -166,7 +189,7 @@ func (r *Resolver) query(p Provider, hostname string, qtype int) ([]string, time
 		return nil, 0, fmt.Errorf("%s returned status %d", p.Name, resp.StatusCode)
 	}
 	var parsed dnsResponse
-	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&parsed); err != nil {
 		return nil, 0, err
 	}
 	var ips []string

@@ -80,9 +80,8 @@ func TestClearScriptToleratesMissingChains(t *testing.T) {
 // A rule command failing after the old chain was flushed must not leave half
 // a block behind.
 func TestApplyScriptRemovesPartialBlockOnFailure(t *testing.T) {
-	// The flush failing too must not stop the rest of the cleanup.
 	log, err := runScript(t, applyScript([]string{"192.0.2.1", "192.0.2.2"}),
-		"-C OUTPUT", "-A DBD_REGION -d 192.0.2.2 ", "-F DBD_REGION")
+		"-A DBD_REGION -d 192.0.2.2 ")
 	var ee *exec.ExitError
 	if !errors.As(err, &ee) || ee.ExitCode() != 1 {
 		t.Fatalf("err = %v, want exit status 1", err)
@@ -92,6 +91,21 @@ func TestApplyScriptRemovesPartialBlockOnFailure(t *testing.T) {
 		if !strings.Contains(after, want) {
 			t.Errorf("missing %q after the failed rule in:\n%s", want, log)
 		}
+	}
+}
+
+func TestClearReportsFailures(t *testing.T) {
+	for _, failure := range []string{"iptables -w -S", "-F DBD_REGION", "-D OUTPUT", "-X DBD_REGION"} {
+		if _, err := runScript(t, clearScript(), failure); err == nil {
+			t.Errorf("clear hid %q failure", failure)
+		}
+	}
+}
+
+func TestCleanupFailureReportsUnknownState(t *testing.T) {
+	fakePkexec(t, "exit 2")
+	if err := pkexecScript("true"); !errors.Is(err, ErrStateUnknown) {
+		t.Fatalf("got %v, want unknown firewall state", err)
 	}
 }
 

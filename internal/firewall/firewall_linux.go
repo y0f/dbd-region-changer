@@ -38,8 +38,7 @@ func RefreshSupported() bool { return false }
 
 // Apply rebuilds the block chains with ips in a single elevated (pkexec) call.
 // IPv4 addresses go to iptables, IPv6 addresses to ip6tables. It returns an
-// ErrNotRun error (ErrNotAuthorized for a refused or dismissed prompt) if the
-// script never ran; after any other error no block is left.
+// ErrNotRun error if the script never ran, or ErrStateUnknown if cleanup failed.
 func Apply(program string, ips []string) error {
 	return pkexecScript(applyScript(ips))
 }
@@ -54,11 +53,10 @@ func Clear() error { return pkexecScript(clearScript()) }
 
 // The scripts run under "set -e", so any failing rule command fails the whole
 // call (and Apply/Add return an error) instead of only the last one counting.
-// Clearing is best effort: the chain may not exist. ip6tables is skipped when
-// the host has no usable IPv6 filter table, since then no IPv6 path exists.
+// Missing chains are harmless; permission and deletion failures are not.
 // -w waits for the xtables lock instead of failing while another tool holds it.
 
-const ip6Usable = "ip6tables -w -L OUTPUT -n >/dev/null 2>&1"
+const ipv6Enabled = "[ -e /proc/net/if_inet6 ]"
 
 // applyScript replaces the chains; if a rule command fails it removes the
 // partial block again, so a failed Apply leaves none.
@@ -77,7 +75,7 @@ func addScript(ips []string) string {
 	v4, v6 := splitFamilies(ips)
 	s := "set -e; " + setupScript("iptables") + dropScript("iptables", v4)
 	if len(v6) > 0 {
-		s += "if " + ip6Usable + "; then " + setupScript("ip6tables") + dropScript("ip6tables", v6) + "fi; "
+		s += "if " + ipv6Enabled + "; then " + setupScript("ip6tables") + dropScript("ip6tables", v6) + "fi; "
 	}
 	return s
 }
@@ -90,8 +88,18 @@ func setupScript(tool string) string {
 func clearScript() string {
 	var b strings.Builder
 	for _, tool := range []string{"iptables", "ip6tables"} {
-		fmt.Fprintf(&b, "%[1]s -w -F %[2]s 2>/dev/null; %[1]s -w -D OUTPUT -j %[2]s 2>/dev/null; %[1]s -w -X %[2]s 2>/dev/null; ",
+		if tool == "ip6tables" {
+			b.WriteString("if " + ipv6Enabled + "; then ")
+		}
+		fmt.Fprintf(&b, "if %[1]s -w -S %[2]s >/dev/null 2>&1; then "+
+			"%[1]s -w -F %[2]s || exit 2; "+
+			"if %[1]s -w -C OUTPUT -j %[2]s 2>/dev/null; then %[1]s -w -D OUTPUT -j %[2]s || exit 2; fi; "+
+			"%[1]s -w -X %[2]s || exit 2; "+
+			"else %[1]s -w -S >/dev/null || exit 2; fi; ",
 			tool, chain)
+		if tool == "ip6tables" {
+			b.WriteString("fi; ")
+		}
 	}
 	return b.String() + "true; "
 }
@@ -134,6 +142,9 @@ func pkexecScript(script string) error {
 		}
 		if ee.ExitCode() == 126 || ee.ExitCode() == 127 {
 			return fmt.Errorf("pkexec iptables: %w: %s", ErrNotAuthorized, strings.TrimSpace(string(out)))
+		}
+		if ee.ExitCode() == 2 {
+			return fmt.Errorf("%w: %s", ErrStateUnknown, strings.TrimSpace(string(out)))
 		}
 		return fmt.Errorf("pkexec iptables failed: %v: %s", err, strings.TrimSpace(string(out)))
 	}

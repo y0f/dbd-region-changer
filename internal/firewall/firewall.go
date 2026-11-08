@@ -1,6 +1,4 @@
-// Package firewall blocks the game's traffic to unwanted AWS regions so it can
-// only reach the chosen region. This holds where the hosts-redirect method
-// cannot, because it blocks the actual game-server IPs, not just DNS.
+// Package firewall blocks traffic to unwanted regions' GameLift ping beacons.
 package firewall
 
 import (
@@ -24,6 +22,9 @@ var ErrNotRun = errors.New("firewall change did not run")
 // ErrNotAuthorized is returned when the password prompt for a change was
 // refused or dismissed. It matches ErrNotRun: nothing was changed.
 var ErrNotAuthorized = fmt.Errorf("not authorized: %w", ErrNotRun)
+
+// ErrStateUnknown means cleanup failed and some rules may still be active.
+var ErrStateUnknown = errors.New("firewall state could not be verified")
 
 func chunk(cidrs []string, size int) [][]string {
 	var out [][]string
