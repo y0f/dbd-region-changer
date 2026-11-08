@@ -3,10 +3,12 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/y0f/dbd-region-changer/actions/workflows/ci.yml"><img src="https://github.com/y0f/dbd-region-changer/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://github.com/y0f/dbd-region-changer/blob/main/go.mod"><img src="https://img.shields.io/github/go-mod/go-version/y0f/dbd-region-changer" alt="Go version"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPLv3-blue.svg" alt="License"></a>
-  <a href="https://github.com/y0f/dbd-region-changer/releases/latest"><img src="https://img.shields.io/github/v/release/y0f/dbd-region-changer?include_prereleases&sort=semver" alt="Release"></a>
+  <a href="https://github.com/y0f/dbd-region-changer/actions/workflows/ci.yml"><img src="https://github.com/y0f/dbd-region-changer/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
+  <a href="https://github.com/y0f/dbd-region-changer/stargazers"><img src="https://img.shields.io/github/stars/y0f/dbd-region-changer?style=flat&amp;color=2563eb" alt="GitHub stars"></a>
+  <a href="https://github.com/y0f/dbd-region-changer/blob/main/go.mod"><img src="https://img.shields.io/github/go-mod/go-version/y0f/dbd-region-changer?label=Go%20minimum&amp;color=2563eb" alt="Go Version"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPLv3-2563eb.svg" alt="License"></a>
+  <a href="https://github.com/y0f/dbd-region-changer/releases/latest"><img src="https://img.shields.io/github/v/release/y0f/dbd-region-changer?sort=semver&amp;color=2563eb" alt="Release"></a>
+  <a href="https://github.com/y0f/dbd-region-changer/blob/main/build/Dockerfile.linux-test"><img src="https://img.shields.io/badge/Docker-Linux%20build-2563eb?logo=docker&amp;logoColor=white" alt="Docker"></a>
 </p>
 
 # Dead by Daylight Region Changer
