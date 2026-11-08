@@ -11,7 +11,7 @@ permissions:
 jobs:
   linux:
     name: Linux (test + build)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -22,7 +22,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            gcc libgl1-mesa-dev xorg-dev libxkbcommon-dev
+            gcc libgl1-mesa-dev libgl1-mesa-dri xorg-dev libxkbcommon-dev xvfb xauth
       - name: Vet
         run: go vet ./...
       - name: Check formatting
@@ -33,10 +33,23 @@ jobs:
         env:
           CGO_ENABLED: "1"
         run: go test -race ./...
-      - name: Build all packages (incl. GUI)
-        env:
-          CGO_ENABLED: "1"
-        run: go build ./...
+      - name: Build Linux package
+        run: |
+          bash scripts/build-linux.sh
+          mv dist/dbdregion dist/dbdregion-linux-amd64
+      - name: Smoke-test Linux package
+        run: |
+          set +e
+          LIBGL_ALWAYS_SOFTWARE=1 timeout 6 xvfb-run -a dist/dbdregion-linux-amd64 > /tmp/dbd-smoke.log 2>&1
+          code=$?
+          set -e
+          cat /tmp/dbd-smoke.log
+          test "$code" -eq 124
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dbdregion-linux-amd64
+          path: dist/dbdregion-linux-amd64
+          if-no-files-found: error
 
   windows:
     name: Windows (test + build)
@@ -58,7 +71,12 @@ jobs:
         run: go test -race ./...
       - name: Vet
         run: go vet ./...
-      - name: Build all packages (incl. GUI, CGO)
-        env:
-          CGO_ENABLED: "1"
-        run: go build ./...
+      - name: Build Windows package
+        run: |
+          ./scripts/build-windows.ps1
+          Move-Item dist/dbdregion.exe dist/dbdregion-windows-amd64.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dbdregion-windows-amd64
+          path: dist/dbdregion-windows-amd64.exe
+          if-no-files-found: error
