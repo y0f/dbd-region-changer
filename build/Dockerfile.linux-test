@@ -12,6 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libgl1-mesa-dri \
         xorg-dev \
         libxkbcommon-dev \
+        libwayland-dev \
         xvfb \
         xauth \
         ca-certificates \
