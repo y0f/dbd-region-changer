@@ -13,8 +13,8 @@ jobs:
     name: Linux (test + build)
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: true
@@ -45,7 +45,7 @@ jobs:
           set -e
           cat /tmp/dbd-smoke.log
           test "$code" -eq 124
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: dbdregion-linux-amd64
           path: dist/dbdregion-linux-amd64
@@ -55,8 +55,8 @@ jobs:
     name: Windows (test + build)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: true
@@ -75,7 +75,7 @@ jobs:
         run: |
           ./scripts/build-windows.ps1
           Move-Item dist/dbdregion.exe dist/dbdregion-windows-amd64.exe
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: dbdregion-windows-amd64
           path: dist/dbdregion-windows-amd64.exe
