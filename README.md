@@ -99,7 +99,7 @@ redirect.
 
 ## Building
 
-Go 1.26.10+ and a C toolchain (the GUI uses cgo + OpenGL).
+Go 1.26.11+ and a C toolchain (the GUI uses cgo + OpenGL).
 
 ```powershell
 # Windows (MinGW gcc on PATH). Embeds the icon and the admin manifest the app needs
@@ -108,7 +108,7 @@ Go 1.26.10+ and a C toolchain (the GUI uses cgo + OpenGL).
 ```
 
 ```bash
-# Linux (apt install gcc libgl1-mesa-dev xorg-dev libxkbcommon-dev)
+# Linux (apt install gcc libgl1-mesa-dev xorg-dev libxkbcommon-dev libwayland-dev)
 ./scripts/build-linux.sh
 ```
 

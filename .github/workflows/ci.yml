@@ -22,7 +22,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            gcc libgl1-mesa-dev libgl1-mesa-dri xorg-dev libxkbcommon-dev xvfb xauth
+            gcc libgl1-mesa-dev libgl1-mesa-dri xorg-dev libxkbcommon-dev libwayland-dev xvfb xauth
       - name: Vet
         run: go vet ./...
       - name: Check formatting

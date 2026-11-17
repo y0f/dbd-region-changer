@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build the Linux binary. Requires gcc + libgl1-mesa-dev + xorg-dev +
-# libxkbcommon-dev. When HEAD is exactly on a release tag, that version is
+# libxkbcommon-dev + libwayland-dev. When HEAD is exactly on a release tag, that version is
 # stamped into the binary.
 set -euo pipefail
 ldflags='-s -w'
