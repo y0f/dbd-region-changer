@@ -2,6 +2,7 @@ package ui
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -155,6 +156,53 @@ func TestBlockIPsCollectsRotatingBeaconPool(t *testing.T) {
 	a := newTestApp(t, []region.Server{{Code: "eu-west-1"}, {Code: "us-east-1"}}, res, "")
 	if got, err := a.blockIPs("eu-west-1"); err != nil || !slices.Equal(got, pool) {
 		t.Fatalf("blockIPs = %v, %v, want the whole pool %v", got, err, pool)
+	}
+}
+
+// cachingDoH answers like a public DoH resolver in front of a beacon: one pool
+// address per name and type, cached, so repeated samples all return it.
+func cachingDoH(t *testing.T) *doh.Resolver {
+	t.Helper()
+	return stubDoH(t, func(string) []string { return []string{"192.0.2.1", "2001:db8::1"} })
+}
+
+type fakePool struct {
+	ips []string
+	err error
+}
+
+func (p fakePool) Collect(context.Context, string) ([]string, error) { return p.ips, p.err }
+
+// Issue #1: with only a caching DoH resolver, half of each beacon's pool is
+// never seen, so it stays reachable and the region lock does nothing.
+func TestBlockIPsWithCachingDoHAloneMissesPool(t *testing.T) {
+	a := newTestApp(t, []region.Server{{Code: "eu-west-1"}, {Code: "us-east-1"}}, cachingDoH(t), "")
+	got, err := a.blockIPs("eu-west-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(got, "192.0.2.2") || slices.Contains(got, "2001:db8::2") {
+		t.Fatalf("caching DoH unexpectedly returned the whole pool: %v", got)
+	}
+}
+
+// The fix: the authoritative pool is blocked in full, on top of the DoH samples.
+func TestBlockIPsUsesAuthoritativePool(t *testing.T) {
+	a := newTestApp(t, []region.Server{{Code: "eu-west-1"}, {Code: "us-east-1"}}, cachingDoH(t), "")
+	a.pool = fakePool{ips: []string{"192.0.2.1", "192.0.2.2", "2001:db8::1", "2001:db8::2"}}
+	want := []string{"192.0.2.1", "192.0.2.2", "2001:db8::1", "2001:db8::2"}
+	if got, err := a.blockIPs("eu-west-1"); err != nil || !slices.Equal(got, want) {
+		t.Fatalf("blockIPs = %v, %v, want the whole pool %v", got, err, want)
+	}
+}
+
+// Where outbound DNS is blocked, the DoH samples still make a block.
+func TestBlockIPsFallsBackToDoHWhenPoolFails(t *testing.T) {
+	a := newTestApp(t, []region.Server{{Code: "eu-west-1"}, {Code: "us-east-1"}}, cachingDoH(t), "")
+	a.pool = fakePool{err: errors.New("port 53 blocked")}
+	want := []string{"192.0.2.1", "2001:db8::1"}
+	if got, err := a.blockIPs("eu-west-1"); err != nil || !slices.Equal(got, want) {
+		t.Fatalf("blockIPs = %v, %v, want the DoH samples %v", got, err, want)
 	}
 }
 

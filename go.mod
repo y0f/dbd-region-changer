@@ -8,6 +8,7 @@ require (
 	github.com/gofrs/flock v0.13.0
 	github.com/prometheus-community/pro-bing v0.9.0
 	golang.org/x/image v0.47.0
+	golang.org/x/net v0.62.0
 	golang.org/x/sys v0.49.0
 )
 
@@ -43,7 +44,6 @@ require (
 	github.com/srwiley/rasterx v0.0.0-20220730225603-2ab79fcdd4ef // indirect
 	github.com/stretchr/testify v1.11.1 // indirect
 	github.com/yuin/goldmark v1.7.17 // indirect
-	golang.org/x/net v0.62.0 // indirect
 	golang.org/x/sync v0.24.0 // indirect
 	golang.org/x/text v0.43.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect

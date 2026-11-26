@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sort"
@@ -12,6 +13,7 @@ import (
 	"fyne.io/fyne/v2/dialog"
 
 	"github.com/y0f/dbd-region-changer/internal/awsranges"
+	"github.com/y0f/dbd-region-changer/internal/beaconpool"
 	"github.com/y0f/dbd-region-changer/internal/elevate"
 	"github.com/y0f/dbd-region-changer/internal/firewall"
 	"github.com/y0f/dbd-region-changer/internal/ping"
@@ -32,6 +34,14 @@ var (
 
 // Sample both address families repeatedly because beacons rotate their answers.
 const beaconSamples = 4
+
+// beaconPool is how the full address pool of a beacon is found; nil in tests
+// that only use the DoH resolver.
+type beaconPool interface {
+	Collect(ctx context.Context, host string) ([]string, error)
+}
+
+var _ beaconPool = (*beaconpool.Collector)(nil)
 
 const unknownRegion = "unknown"
 
@@ -69,9 +79,19 @@ func (a *App) programPath() string {
 	return a.dbdPath
 }
 
-// beaconIPs collects fresh A/AAAA answers from one beacon's rotating pool.
+// beaconIPs collects the addresses of one beacon's rotating pool. The
+// authoritative servers return the whole pool (public DoH resolvers cache one
+// answer per TTL, so sampling them alone misses part of it); the DoH samples
+// are added on top, and are all that is left where outbound DNS is blocked.
 func (a *App) beaconIPs(host string) []string {
 	var ips []string
+	if a.pool != nil {
+		all, err := a.pool.Collect(a.ctx, host)
+		if err != nil {
+			a.log.Warn("authoritative beacon lookup failed; using DoH samples only", "host", host, "err", err)
+		}
+		ips = append(ips, all...)
+	}
 	for i := 0; i < beaconSamples; i++ {
 		all, err := a.resolver.ResolveAllFresh(host)
 		if err != nil {

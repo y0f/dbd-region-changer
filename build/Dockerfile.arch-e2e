@@ -1,0 +1,20 @@
+# End-to-end check of the Linux region lock on an Arch base (CachyOS is
+# Arch-based and uses the nftables backend of iptables). Needs network access
+# and NET_ADMIN; it changes only the container's own firewall.
+#
+#   docker build -f build/Dockerfile.arch-e2e -t dbd-arch-e2e .
+#   docker run --rm --cap-add NET_ADMIN dbd-arch-e2e
+FROM golang:1.26.10-bookworm AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -o /beacon-e2e ./scripts/beacon-e2e
+
+FROM archlinux:latest
+RUN pacman -Sy --noconfirm --needed iptables ca-certificates && pacman -Scc --noconfirm
+# The app changes the firewall through pkexec; the container already runs as
+# root, so this stand-in runs the command directly.
+RUN printf '#!/bin/sh\nexec "$@"\n' > /usr/local/bin/pkexec && chmod +x /usr/local/bin/pkexec
+COPY --from=build /beacon-e2e /usr/local/bin/beacon-e2e
+CMD ["sh", "-c", "iptables -V && beacon-e2e"]

@@ -20,6 +20,7 @@ import (
 	"github.com/y0f/dbd-region-changer/assets"
 	"github.com/y0f/dbd-region-changer/internal/applog"
 	"github.com/y0f/dbd-region-changer/internal/apply"
+	"github.com/y0f/dbd-region-changer/internal/beaconpool"
 	"github.com/y0f/dbd-region-changer/internal/dbdpath"
 	"github.com/y0f/dbd-region-changer/internal/doh"
 	"github.com/y0f/dbd-region-changer/internal/elevate"
@@ -38,6 +39,7 @@ type App struct {
 
 	host     *hostsfile.Hosts
 	resolver *doh.Resolver
+	pool     beaconPool
 	regions  []region.Server // set once on the UI goroutine before the loops start
 
 	selectWidget     *widget.Select
@@ -79,6 +81,7 @@ func New(log *applog.Logger) *App {
 		cancel:   cancel,
 		host:     hostsfile.New(),
 		resolver: doh.NewContext(ctx, doh.DefaultProviders()),
+		pool:     beaconpool.New(),
 	}
 }
 

@@ -91,8 +91,9 @@ flowchart LR
 ```
 
 DBD runs on AWS GameLift. The client pings each region's beacon (`gamelift-ping.<region>.api.aws:7770`)
-and reports the latencies to matchmaking. The app resolves those beacon addresses over
-DNS-over-HTTPS and blocks all but your chosen region's: with Windows Firewall rules scoped to the DBD
+and reports the latencies to matchmaking. Each beacon name rotates through a small pool of
+addresses, so the app asks AWS's authoritative nameservers for the whole pool (public resolvers
+cache a single answer), adds DNS-over-HTTPS answers, and blocks all but your chosen region's: with Windows Firewall rules scoped to the DBD
 exe, or with iptables rules on Linux that apply to every program on the machine. Nothing is
 intercepted and no game files are touched. On Linux without iptables it falls back to a hosts-file
 redirect.
@@ -115,6 +116,14 @@ Go 1.26.10+ and a C toolchain (the GUI uses cgo + OpenGL).
 Both write to `dist/`. Tests: `bash scripts/test.sh` runs the pure-Go `internal/` tests without a
 C toolchain but skips the GUI package `ui/`; the full suite, `ui/` included, needs gcc:
 `CGO_ENABLED=1 go test -race ./...`. Linux build check from Windows (Docker): `./scripts/linux-test.ps1`.
+
+End-to-end check of the Linux lock against the live beacons, with real iptables (nftables backend)
+on an Arch base, in a throwaway container:
+
+```bash
+docker build -f build/Dockerfile.arch-e2e -t dbd-arch-e2e .
+docker run --rm --cap-add NET_ADMIN dbd-arch-e2e
+```
 
 The README screenshot is captured from the running app with live measurements:
 `LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a go run ./scripts/preview docs/img/preview.png`.
